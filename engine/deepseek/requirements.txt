@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+pydantic-settings
+openai>=1.0
+python-multipart
+
+# 文档抽取（/api/extract）。三者都只用于把文件转成纯文本。
+# pymupdf 会连带装上 onnxruntime（pymupdf-layout 的依赖），体积约 100MB，
+# 但换来的是 PDF 排版还原质量，比纯 Python 的 pdfminer 好一代。
+pymupdf>=2.0
+python-docx>=1.1
+openpyxl>=3.1
