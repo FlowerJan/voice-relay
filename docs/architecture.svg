@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" width="100%" role="img" font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, Source Han Sans SC, sans-serif">
+<title>voice-relay · 五进程架构</title>
+<desc>浏览器经 relay 协议层统一收口，再分发到聊天、语音识别、语音合成三个模型层；协议层不含业务，模型层不感知协议。</desc>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+<path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+</marker>
+</defs>
+
+<rect x="340" y="30" width="320" height="70" rx="10" fill="#F1EFE8" stroke="#888780" stroke-width="0.6"/>
+<text x="500" y="56" font-size="15" font-weight="500" fill="#2C2C2A" text-anchor="middle">浏览器 · Vue3 + TypeScript</text>
+<text x="500" y="78" font-size="12" fill="#5F5E5A" text-anchor="middle">会话与历史存本地 localStorage + IndexedDB</text>
+
+<line x1="500" y1="100" x2="500" y2="145" stroke="#5F5E5A" stroke-width="1.6" marker-end="url(#a)"/>
+<text x="514" y="128" font-size="12" fill="#5F5E5A">/api/*　全部请求只认这一个入口</text>
+
+<rect x="170" y="150" width="660" height="122" rx="14" fill="#E6F1FB" stroke="#185FA5" stroke-width="0.8"/>
+<text x="500" y="180" font-size="16" font-weight="500" fill="#0C447C" text-anchor="middle">relay　:9000　协议层</text>
+<text x="500" y="208" font-size="12.5" fill="#185FA5" text-anchor="middle">路由分发 · 分路超时 · 错误收口 · X-Trace-Id 全链路贯穿</text>
+<text x="500" y="234" font-size="12.5" fill="#185FA5" text-anchor="middle">不含任何业务逻辑，也不持有任何模型</text>
+<text x="500" y="252" font-size="11.5" fill="#185FA5" text-anchor="middle">客户端传来的 system 一律丢弃，由模型层统一注入</text>
+
+<line x1="250" y1="272" x2="250" y2="314" stroke="#5F5E5A" stroke-width="1.6" marker-end="url(#a)"/>
+<line x1="500" y1="272" x2="500" y2="314" stroke="#5F5E5A" stroke-width="1.6" marker-end="url(#a)"/>
+<line x1="750" y1="272" x2="750" y2="314" stroke="#5F5E5A" stroke-width="1.6" marker-end="url(#a)"/>
+
+<rect x="150" y="320" width="200" height="100" rx="10" fill="#F1EFE8" stroke="#888780" stroke-width="0.6"/>
+<text x="250" y="348" font-size="15" font-weight="500" fill="#2C2C2A" text-anchor="middle">聊天服务</text>
+<text x="250" y="372" font-size="12" fill="#5F5E5A" text-anchor="middle">:8000 · deepseek-flash</text>
+<text x="250" y="396" font-size="12" fill="#5F5E5A" text-anchor="middle">SSE 四事件 · 思维链透传</text>
+
+<rect x="400" y="320" width="200" height="100" rx="10" fill="#EAF3DE" stroke="#3B6D11" stroke-width="0.8"/>
+<text x="500" y="348" font-size="15" font-weight="500" fill="#173404" text-anchor="middle">语音识别</text>
+<text x="500" y="372" font-size="12" fill="#3B6D11" text-anchor="middle">:8001 · Qwen3-ASR-0.6B</text>
+<text x="500" y="396" font-size="12" fill="#3B6D11" text-anchor="middle">1.8GB 权重常驻，纯本地</text>
+
+<rect x="650" y="320" width="200" height="100" rx="10" fill="#F1EFE8" stroke="#888780" stroke-width="0.6"/>
+<text x="750" y="348" font-size="15" font-weight="500" fill="#2C2C2A" text-anchor="middle">语音合成</text>
+<text x="750" y="372" font-size="12" fill="#5F5E5A" text-anchor="middle">:8002 · edge-tts</text>
+<text x="750" y="396" font-size="12" fill="#5F5E5A" text-anchor="middle">按句切段 · 边合成边播</text>
+
+<line x1="250" y1="420" x2="250" y2="446" stroke="#B4B2A9" stroke-width="0.8" stroke-dasharray="3 3"/>
+<text x="250" y="466" font-size="12" fill="#888780" text-anchor="middle">远程 API · 便宜、有思维链</text>
+
+<line x1="500" y1="420" x2="500" y2="446" stroke="#B4B2A9" stroke-width="0.8" stroke-dasharray="3 3"/>
+<text x="500" y="466" font-size="12" fill="#3B6D11" text-anchor="middle">本地推理 · 断网可用、隐私不出门</text>
+
+<line x1="750" y1="420" x2="750" y2="446" stroke="#B4B2A9" stroke-width="0.8" stroke-dasharray="3 3"/>
+<text x="750" y="466" font-size="12" fill="#888780" text-anchor="middle">远程合成 · 无需显卡</text>
+
+<line x1="60" y1="510" x2="940" y2="510" stroke="#D3D1C7" stroke-width="0.8"/>
+<text x="60" y="540" font-size="12.5" fill="#5F5E5A">边界规则一　协议层不写业务，模型层不感知协议 —— 换掉任何一路模型，前端一行不用改</text>
+<text x="60" y="566" font-size="12.5" fill="#5F5E5A">边界规则二　四个服务只绑 127.0.0.1，对外仅 relay 一个端口；任一路崩溃不影响另外两路</text>
+<text x="60" y="592" font-size="12.5" fill="#5F5E5A">边界规则三　后端完全无状态，历史留在前端 —— 这是不做数据库的主动取舍，不是省事</text>
+</svg>
