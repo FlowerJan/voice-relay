@@ -1,0 +1,32 @@
+# ================= 换行符 =================
+# 仓库内存统一 LF；检出到工作区时由 git 按平台转换。
+# 没有这条规则，Windows 开发 + Linux 检出的组合会把每个文件都标记为已修改。
+* text=auto eol=lf
+
+# Windows 脚本必须是 CRLF，否则 cmd 解析可能出错
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# ================= 二进制（禁止换行转换与文本 diff）=================
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.wav binary
+*.mp3 binary
+*.mp4 binary
+*.webm binary
+*.onnx binary
+*.pt binary
+*.bin binary
+*.pdf binary
+*.exe binary
+
+# SVG 是纯文本，保留可 diff 能力（架构图需要能看出改了什么）
+*.svg text eol=lf
+
+# lock 文件不参与 diff 展示，避免淹没真实改动
+package-lock.json -diff

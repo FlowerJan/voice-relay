@@ -1,0 +1,46 @@
+# ================= Python =================
+__pycache__/
+*.pyc
+
+# 第一阶段（封存，只读）
+backend/venv/
+backend/.env
+
+# 第二阶段：四套独立环境，谁都不进 git
+relay/venv/
+relay/.env
+engine/deepseek/venv/
+engine/deepseek/.env
+engine/asr/venv/
+engine/tts/venv/
+
+# ================= Node =================
+frontend/node_modules/
+frontend/dist/
+frontend/_domtest/
+frontend/_e2e.mjs
+view/node_modules/
+view/dist/
+# 测试脚本的打包产物（源码 _session_test.ts / _tts_test.ts 要留）
+view/_session_test.mjs
+view/_tts_test.mjs
+
+# ================= 大件二进制（不进 git 的三个）=================
+# 1) 模型权重 1.75GB：GitHub 单文件上限 100MB，且可重新下载
+engine/asr/weights/
+# 2) ffmpeg 64MB：官方静态版，README 写清"自行下载放到这里"
+engine/asr/bin/
+# 3) 测试音频 / 临时转码产物
+engine/asr/samples/*.wav
+engine/asr/samples/*.webm
+engine/asr/samples/*.mp4
+
+# ================= 编辑器 / 系统 =================
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
+
+# ================= 工作区数据（不进 git）=================
+.workbuddy/
