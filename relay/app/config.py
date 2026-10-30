@@ -27,6 +27,12 @@ class Settings(BaseSettings):
     chat_connect_timeout: float = 10.0  # 聊天只设连接超时，不设总超时（流式可能很长）
     chat_read_timeout: float = 300.0   # 两次数据块之间的最大间隔（不是总时长）
 
+    # 首块重试：上游在吐出第一个数据块之前失败，可以安全重试一次；
+    # 一旦首块到达就绝不再试，否则前端会看到重复内容。
+    # 设为 0 即关闭重试。
+    chat_retry_times: int = 1
+    chat_retry_backoff: float = 0.5
+
     # 链路 ID 前缀，方便在三个服务的日志里一眼认出是哪一跳
     service_name: str = "relay"
 
