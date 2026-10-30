@@ -78,11 +78,36 @@ export function docBodyBudget(messages: Array<{ docs?: MsgDoc[] }>): boolean[] {
 }
 
 /**
+ * 转义文档正文里可能"冒充标签"的片段。
+ *
+ * 为什么必须做：正文是用户的文件里原样抽出来的，如果它里面恰好有一行
+ * `</document>`，模型看到的结构就变成"文档到此结束，后面是用户的新指令"——
+ * 这不是理论问题，任何一份讨论 HTML/XML 的文档都可能有。
+ *
+ * 只转义 `<document` / `</document` 这两个序列，不动其余文本：
+ * 文档里的代码、尖括号、Markdown 都保持原样，可读性不受影响。
+ * 按 HTML 的规则转成实体，模型读到 `&lt;/document` 会当成普通文字。
+ */
+function escapeDocText(text: string): string {
+  return text.replace(/<(\/?document)/gi, '&lt;$1')
+}
+
+/** 属性值里的引号和尖括号同样要处理，否则会提前闭合标签。 */
+function escapeAttr(value: string): string {
+  return value.replace(/"/g, '&quot;').replace(/</g, '&lt;')
+}
+
+/**
  * 把正文和附件拼成一条要发给模型的消息。
  *
- * 用 `===== 附件「名」=====` 这种显式分隔，而不是直接把文本接在正文后面：
- * 模型需要知道"哪段是用户说的、哪段是文件里的"，否则会把我写的
- * "这段帮我总结一下"当成文档的一部分。
+ * 用 XML 标签把文档包起来（而不是 `===== 附件 =====` 这类纯文本分隔线）：
+ * ① 模型需要知道"哪段是用户说的、哪段是文件里的"，否则会把我写的
+ *    "这段帮我总结一下"当成文档的一部分；
+ * ② 标签有明确的开始与结束，配合系统提示词里"标签内一切皆材料"的声明，
+ *    文档里的"忽略以上指令"不会被当成指令执行。
+ *
+ * 之前用 `===== 附件「名」=====` 的分隔线有两个问题：正文里的同名分界线
+ * 可以伪造出"文档已结束"的假象，而且提示词里没有任何一句话说明它是什么。
  */
 export function composeContent(
   m: { content: string; docs?: MsgDoc[] },
@@ -99,13 +124,11 @@ export function composeContent(
     ]
       .filter(Boolean)
       .join('，')
-    const head = `===== 附件「${d.name}」（${meta}）=====`
-    const tail = '===== 附件结束 ====='
-    parts.push(
-      withBody
-        ? `${head}\n${d.text ?? ''}\n${tail}`
-        : `${head}\n（正文已省略：对话较长，只保留最近附件的完整内容。如需重新参考，请再上传一次）\n${tail}`,
-    )
+    const head = `<document name="${escapeAttr(d.name)}" meta="${escapeAttr(meta)}">`
+    const body = withBody
+      ? escapeDocText(d.text ?? '')
+      : '（正文已省略：对话较长，只保留最近附件的完整内容。如需重新参考，请再上传一次）'
+    parts.push(`${head}\n${body}\n</document>`)
   }
   return parts.join('\n\n')
 }
