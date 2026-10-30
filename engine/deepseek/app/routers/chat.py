@@ -32,7 +32,15 @@ async def chat_stream(req: ChatRequest):
 
 @router.get("/api/health")
 async def health():
-    return {"status": "ok", "model": settings.deepseek_model}
+    # 带上 service/port：dev.py 靠它确认"占着 8000 的确实是自己"，
+    # 少了这个字段，一个恰好返回 {"status":"ok"} 的别家程序会被误认。
+    return {
+        "status": "ok",
+        "layer": "model",
+        "service": "chat",
+        "port": 8000,
+        "model": settings.deepseek_model,
+    }
 
 
 @router.get("/api/balance")

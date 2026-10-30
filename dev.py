@@ -13,8 +13,11 @@
 
 另外两个刻意的设计：
 
-  * 端口已在监听 → 不报错，直接跳过。你可以用它起全部，再单独去某个目录
-    重起某个服务调试，两者不打架。
+  * 端口已在监听 → 先请求 /health 认身份，认得出来才跳过（这样你可以用它起全部，
+    再单独去某个目录重起某个服务调试，两者不打架）；认不出来说明端口被**别的
+    程序**占着，直接报出占用者和处置办法后退出。
+    只看"端口有人听"是不够的——本项目就吃过这个亏：一个无关的 python 进程先绑了
+    8000，这里静默跳过、以为"已经在跑"，结果前端一路 404，排查了半天。
   * Ctrl+C 一次收全部。Windows 下 uvicorn 的 reload 模式会派生子进程，
     必须 taskkill /T 才能连带子进程一起杀掉，否则端口被僵尸进程占住、
     表现为"改了代码不生效"——这个坑本项目已经踩过一次。
@@ -37,6 +40,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
@@ -72,17 +77,27 @@ class Service:
     port: int
     wait: float          # 最多等它多少秒就绪
     desc: str
+    health: str          # 探活路径，用来确认"占着端口的到底是谁"
+    identity: str        # 该路径返回体里必须出现的身份标识
     proc: subprocess.Popen | None = None
 
 
 # 顺序即依赖顺序：三个模型层 → 协议层 → 前端。
 # 网关不主动探活，先起 9000 的话它不报错，但一收请求就是 502。
+#
+# identity 一律取"对方自己吐出来的、别人极不可能恰好也吐的那一串"：
+# 四个后端服务认 service 字段，前端认 Vite 注入的 /@vite/client。
 SERVICES: list[Service] = [
-    Service("chat",  "engine/deepseek", ["run.py"],        8000, 30, "想 · deepseek-flash（远程）"),
-    Service("asr",   "engine/asr",      ["run.py"],        8001, 90, "听 · Qwen3-ASR-0.6B（本地 CPU，读 1.8GB）"),
-    Service("tts",   "engine/tts",      ["run.py"],        8002, 30, "说 · edge-tts（远程合成）"),
-    Service("relay", "relay",           ["run.py"],        9000, 30, "协议层 · 唯一对外入口"),
-    Service("view",  "view",            ["run", "dev"],    5173, 60, "前端 · Vite"),
+    Service("chat",  "engine/deepseek", ["run.py"],        8000, 30, "想 · deepseek-flash（远程）",
+            "/api/health", '"service":"chat"'),
+    Service("asr",   "engine/asr",      ["run.py"],        8001, 90, "听 · Qwen3-ASR-0.6B（本地 CPU，读 1.8GB）",
+            "/health", '"service":"asr"'),
+    Service("tts",   "engine/tts",      ["run.py"],        8002, 30, "说 · edge-tts（远程合成）",
+            "/health", '"service":"tts"'),
+    Service("relay", "relay",           ["run.py"],        9000, 30, "协议层 · 唯一对外入口",
+            "/api/health", '"service":"relay"'),
+    Service("view",  "view",            ["run", "dev"],    5173, 60, "前端 · Vite",
+            "/", "@vite/client"),
 ]
 
 
@@ -104,10 +119,91 @@ def port_open(port: int, timeout: float = 0.25) -> bool:
     return False
 
 
+def _squeeze(s: str) -> str:
+    """去掉全部空白再比。FastAPI 吐的是紧凑 JSON，换个实现就可能带空格。"""
+    return "".join(s.split())
+
+
+def fetch_head(port: int, path: str, timeout: float = 5.0) -> str | None:
+    """取响应体开头一段用于认身份。连不上、超时、非 2xx 一律返回 None。
+
+    超时给到 5s 是量出来的：relay 的 /api/health 要串并三个下游，某个下游刚挂
+    时会等它自己的超时，实测 2.2s。给 1.5s 就会把"自己人反应慢"误判成"外人占位"。
+    """
+    try:
+        with urllib.request.urlopen(f"http://localhost:{port}{path}", timeout=timeout) as r:
+            return r.read(8192).decode("utf-8", "replace")
+    except (urllib.error.URLError, OSError, ValueError):
+        return None
+
+
+def is_self(svc: Service) -> bool:
+    """端口上跑的到底是不是这个服务。返回体里认得出 identity 才算。
+
+    探不到就再给一次机会：首轮可能正好赶上对方在做慢启动或慢响应，
+    这里的目标是抓"根本不是它"，不是抓"它此刻有点慢"。
+    """
+    for attempt in range(2):
+        body = fetch_head(svc.port, svc.health)
+        if body is not None and _squeeze(svc.identity) in _squeeze(body):
+            return True
+        if attempt == 0:
+            time.sleep(0.4)
+    return False
+
+
+def _win_proc_names() -> dict[str, str]:
+    """PID → 进程名。查不到就返回空表，不影响报错信息的主体。"""
+    try:
+        out = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"],
+            capture_output=True, text=True, errors="replace", timeout=5,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return {}
+    table: dict[str, str] = {}
+    for line in out.splitlines():
+        cols = [c.strip().strip('"') for c in line.split('","')]
+        if len(cols) >= 2 and cols[1].isdigit():
+            table[cols[1]] = cols[0]
+    return table
+
+
+def occupant(port: int) -> str:
+    """谁占着这个端口 —— 纯给人看的，查不到也要能读。"""
+    if not IS_WIN:
+        return f"未知（非 Windows，用 lsof -i :{port} 查）"
+    try:
+        out = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True, text=True, errors="replace", timeout=5,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return "未知（netstat 调不起来）"
+    pids = {
+        parts[4]
+        for parts in (line.split() for line in out.splitlines())
+        if len(parts) >= 5 and parts[3] == "LISTENING" and parts[1].endswith(f":{port}")
+    }
+    if not pids:
+        return "未知（netstat 里没有 LISTENING 记录，可能只绑了 IPv6）"
+    names = _win_proc_names()
+    return "、".join(f"{names.get(p, '?')}(PID {p})" for p in sorted(pids))
+
+
 def launch(svc: Service) -> None:
     if port_open(svc.port):
-        say(f":{svc.port} 已在监听，跳过（视为已在外运行）", svc.name)
-        return
+        if is_self(svc):
+            say(f":{svc.port} 已是本服务在跑，跳过", svc.name)
+            return
+        # 端口有人听 ≠ 是我们的服务。放它过去只会得到"前端白屏 404"这种远因报错，
+        # 所以这里就当场停下，把"谁占的、怎么办"直接说清楚。
+        raise SystemExit(
+            f"\n:{svc.port} 上认不出本服务（探活 {svc.health} 里没有 {svc.identity}）。\n"
+            f"  占用者：{occupant(svc.port)}\n"
+            f"  可能是别的程序占了这个端口；也可能它就是本服务的旧进程——\n"
+            f"  旧进程要杀掉重启才会加载新代码。关掉它再跑 dev.py 即可。\n"
+        )
 
     cwd = ROOT / svc.path
     if not cwd.is_dir():
@@ -164,10 +260,12 @@ def wait_ready(svc: Service) -> None:
     raise SystemExit(f"{svc.name} 等了 {svc.wait:.0f}s 还没监听 :{svc.port}，往上看它的日志")
 
 
-def stop_all() -> None:
+def stop_all() -> bool:
+    """收掉本次起的进程。一个都没起时什么都不说 —— 免得给"启动失败"的场景
+    再补一句莫名其妙的"已全部停止"。返回是否真停过东西。"""
     live = [s for s in SERVICES if s.proc and s.proc.poll() is None]
     if not live:
-        return
+        return False
     say(f"停止 {len(live)} 个进程…")
     for svc in live:
         assert svc.proc is not None
@@ -184,6 +282,7 @@ def stop_all() -> None:
             svc.proc.wait(timeout=5)   # type: ignore[union-attr]
         except subprocess.TimeoutExpired:
             svc.proc.kill()            # type: ignore[union-attr]
+    return True
 
 
 def do_check() -> int:
@@ -198,10 +297,18 @@ def do_check() -> int:
             py = cwd / ("venv/Scripts/python.exe" if IS_WIN else "venv/bin/python")
             ok = py.exists()
             need = str(py.relative_to(ROOT)) if cwd.is_dir() else str(py)
-        state = "占用中" if port_open(svc.port) else "空闲"
+        state, taken = "空闲", False
+        if port_open(svc.port):
+            if is_self(svc):
+                state = "本服务"
+            else:
+                state, taken = "被他人占", True
         mark = "OK  " if ok else "缺失"
-        say(f"{mark} :{svc.port:<5} {svc.path:<16} 端口{state}   {'' if ok else '缺 ' + need}", svc.name)
+        say(f"{mark} :{svc.port:<5} {svc.path:<16} 端口 {state:<4}  {'' if ok else '缺 ' + need}", svc.name)
+        if taken:
+            say(f"      ↑ 认不出本服务，dev.py 会拒绝启动；占用者：{occupant(svc.port)}")
         bad += 0 if ok else 1
+        bad += 1 if taken else 0
     say("体检通过，可以 dev.py 启动" if not bad else f"有 {bad} 个服务环境不全", "sys")
     return 0 if not bad else 1
 
@@ -238,8 +345,8 @@ def main() -> int:
         say("")
         say("收到 Ctrl+C")
     finally:
-        stop_all()
-        say("已全部停止")
+        if stop_all():
+            say("已全部停止")
     return 0
 
 
