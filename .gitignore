@@ -2,9 +2,10 @@
 __pycache__/
 *.pyc
 
-# 第一阶段（封存，只读）
-backend/venv/
-backend/.env
+# 第一阶段（源码已归档到 legacy/v1-single-process/，原目录只剩运行环境）
+# 用 / 锚定根目录，否则会连带忽略 legacy 里的归档副本
+/backend/
+/frontend/
 
 # 第二阶段：四套独立环境，谁都不进 git
 relay/venv/
@@ -15,10 +16,6 @@ engine/asr/venv/
 engine/tts/venv/
 
 # ================= Node =================
-frontend/node_modules/
-frontend/dist/
-frontend/_domtest/
-frontend/_e2e.mjs
 view/node_modules/
 view/dist/
 # 测试脚本的打包产物（源码 _session_test.ts / _tts_test.ts 要留）
