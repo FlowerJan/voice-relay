@@ -1,0 +1,13 @@
+{
+  "$comment": "聊天 SSE 事件契约：引擎只能发这里列出的类型，前端必须全部处理。新增或改名时先改这个文件，两侧的契约测试会同时失败提醒。",
+  "version": 1,
+  "events": {
+    "reasoning": "思维链增量。字段 content",
+    "delta": "正文增量。字段 content",
+    "done": "正常结束。字段 reason：stop 正常 / length 被 max_tokens 截断",
+    "error": "错误。字段 message，已翻译成人话"
+  },
+  "not_events": [
+    "OpenAI 原始 chunk 结构不外泄：引擎负责把它归一成上面四种，前端不需要知道 choices/delta 长什么样"
+  ]
+}
