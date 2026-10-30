@@ -200,15 +200,16 @@ def main() -> int:
             f"最慢档比它慢 {spread * 100:.0f}%。"
         )
 
-    # 当前代码设的是 os.cpu_count()（逻辑核数）。如果它不是最快的，
-    # 说明超线程在这里带来的是线程争用而不是吞吐——这一点值得直接说出来。
-    logical_row = next((row for row in rows if row["threads"] == logical), None)
-    if logical_row and fastest["threads"] != logical:
-        over = (logical_row["median"] - fastest["median"]) / fastest["median"]
+    # 当前代码默认封顶到 4 线程（见 engine/asr/app/model_holder.py）。用这个值
+    # 和实测最优档对照：不一致说明这台机器的最优值不在这里，值得写进结论。
+    default_threads = min(4, logical)
+    default_row = next((row for row in rows if row["threads"] == default_threads), None)
+    if default_row and fastest["threads"] != default_threads:
+        over = (default_row["median"] - fastest["median"]) / fastest["median"]
         print(
-            f"**当前配置可能偏高**：`engine/asr` 现在按逻辑核数 {logical} 线程启动，"
-            f"比 {fastest['threads']} 线程慢 {over * 100:.0f}%。"
-            "小模型在 CPU 上受内存带宽限制，超出的线程只增加争用。"
+            f"**默认档不是最快**：`engine/asr` 默认封顶 {default_threads} 线程，"
+            f"在这台机器上比 {fastest['threads']} 线程慢 {over * 100:.0f}%。"
+            "最优值和架构有关（大小核分布、超线程、内存带宽），换机器要重跑。"
             "要改的话设 `ASR_THREADS` 即可，不用动代码。"
         )
     print()

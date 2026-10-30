@@ -10,7 +10,9 @@ import torch
 
 WAV = "samples/asr_zh.wav"
 WEIGHTS = "weights/Qwen3-ASR-0.6B"
-THREADS = int(os.getenv("ASR_THREADS", str(os.cpu_count() or 4)))
+# 与 app/model_holder.py 保持一致：封顶 4，小机器用满。改一处就要改两处，
+# 否则冒烟测试和服务跑的不是同一套线程设置，"测过了"就没有意义。
+THREADS = int(os.getenv("ASR_THREADS", str(min(4, os.cpu_count() or 4))))
 
 print(f"[1] 环境 | torch={torch.__version__} | cuda={torch.cuda.is_available()} | 线程={THREADS}")
 torch.set_num_threads(THREADS)
