@@ -37,10 +37,16 @@ WEIGHTS_DIR = BASE_DIR / "weights" / "Qwen3-ASR-0.6B"
 # 所以保留 ASR_THREADS 覆盖——而不是把某台机器的最优值当成普适结论。
 THREADS = int(os.getenv("ASR_THREADS", str(min(4, os.cpu_count() or 4))))
 
+# 预热用的音频。仓库里带了一段 4.2 秒中文样本，没有时退化成静音（见 _warmup）。
+WARMUP_AUDIO = BASE_DIR / "samples" / "asr_zh.wav"
+WARMUP_SILENCE_SECONDS = 1.0
+WARMUP_SAMPLE_RATE = 16000
+
 _state: dict = {
     "model": None,
     "loaded": False,
     "load_seconds": 0.0,
+    "warmup_seconds": 0.0,
     "device": "cpu",
     "threads": THREADS,
     "load_error": None,
@@ -57,10 +63,53 @@ def status() -> dict:
         "device": _state["device"],
         "threads": _state["threads"],
         "load_seconds": round(_state["load_seconds"], 2),
+        "warmup_seconds": round(_state["warmup_seconds"], 2),
         "weights_dir": str(WEIGHTS_DIR),
         "weights_exist": WEIGHTS_DIR.exists(),
         "error": _state["load_error"],
     }
+
+
+def _write_silence() -> str:
+    """没有样本时用 1 秒静音兜底。放临时目录，不污染 samples。"""
+    import tempfile
+
+    import numpy as np
+    import soundfile as sf
+
+    path = Path(tempfile.gettempdir()) / "asr_warmup_silence.wav"
+    frames = np.zeros(int(WARMUP_SAMPLE_RATE * WARMUP_SILENCE_SECONDS), dtype="float32")
+    sf.write(str(path), frames, WARMUP_SAMPLE_RATE)
+    return str(path)
+
+
+def _warmup(model) -> float:
+    """空跑一次推理，把"第一句特慢"的一次性开销提前付掉。返回耗时，失败返回 0。
+
+    **为什么值得多做这一步：** 进程内第一次推理比稳态慢一大截，本机实测 4.17s
+    对 2.55s，差 63%。这笔开销不是模型在"思考"，是 oneDNN 的执行计划、内存池、
+    算子派发在第一次被真正走到时才建起来——它只付一次，但默认付在用户的第一句
+    话上。挪到启动阶段，用户就永远碰不到。
+
+    **为什么用真实语音而不是静音：** 静音很可能直接产出空结果、提前退出解码，
+    只暖到了编码器，没暖到逐 token 生成那段循环，而后者才是耗时大头。所以优先
+    用仓库里的样本；没有样本文件时才退化成静音，保证不因缺文件就起不来。
+
+    **为什么失败只 warning：** 预热是优化，不是正确性。真失败了服务照常能用，
+    只是第一句慢一次——退回改动之前的样子，比不上线一个起不来的服务更糟。
+    """
+    started = time.time()
+    try:
+        audio = str(WARMUP_AUDIO) if WARMUP_AUDIO.exists() else _write_silence()
+        model.transcribe(audio=audio, language=None)
+        elapsed = time.time() - started
+        logger.info(
+            "预热完成 | 耗时 %.2fs | 样本 %s", elapsed, Path(audio).name,
+        )
+        return elapsed
+    except Exception:  # noqa: BLE001
+        logger.warning("预热失败，忽略；代价是首句会慢一次", exc_info=True)
+        return 0.0
 
 
 def load() -> None:
@@ -99,11 +148,17 @@ def load() -> None:
         return
 
     _state["model"] = model
-    _state["loaded"] = True
     _state["load_seconds"] = time.time() - started
+
+    # 预热放到 loaded=True 之前。loaded 的含义是"能对外服务了"，而一个没预热过的
+    # 模型，它的第一句要付 63% 的额外开销——那不算能服务。load() 在 lifespan 里
+    # 同步调用，所以这段时间内 uvicorn 还没开始接请求，不会有人撞上半成品状态。
+    _state["warmup_seconds"] = _warmup(model)
+
+    _state["loaded"] = True
     logger.info(
-        "模型加载完成 | 耗时 %.2fs | 设备 %s | 线程 %d",
-        _state["load_seconds"], _state["device"], THREADS,
+        "模型就绪 | 加载 %.2fs + 预热 %.2fs | 设备 %s | 线程 %d",
+        _state["load_seconds"], _state["warmup_seconds"], _state["device"], THREADS,
     )
 
 

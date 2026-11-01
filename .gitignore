@@ -31,6 +31,9 @@ engine/asr/bin/
 engine/asr/samples/*.wav
 engine/asr/samples/*.webm
 engine/asr/samples/*.mp4
+# 例外：冒烟测试与预热都依赖这一段，132K 换"clone 下来就能验证"很划算。
+# 其余样本是调试时随手录的 / 转的，版本噪声大于价值，继续忽略。
+!engine/asr/samples/asr_zh.wav
 
 # ================= 编辑器 / 系统 =================
 .DS_Store
