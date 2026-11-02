@@ -192,7 +192,7 @@
 |---|---|
 | **1.7×** | 稳定态实时率：4.20 秒中文语音用 2.44~2.52 秒。60 秒录音约需 35 秒 |
 | **4** | 默认线程数上限：4 P 核 / 12 物理核 / 16 逻辑核，实测 2.44s / 2.75s / 2.84s，4 线程最快 |
-| **170 项** | 自动检查：协议层 55 + 引擎 15 + 抽取 29 + 前端 71（含类型检查） |
+| **177 项** | 自动检查：协议层 55 + 端到端 7 + 引擎 15 + 抽取 29 + 前端 71（含类型检查）。端到端那 7 项真起 uvicorn，默认不跑 |
 
 三条都能自己跑出来，不用相信这段文字——首次先装开发依赖（只有 pytest，起服务不需要）：
 
@@ -201,6 +201,7 @@ cd relay && venv/Scripts/python.exe -m pip install -r requirements-dev.txt && cd
 cd engine/deepseek && venv/Scripts/python.exe -m pip install -r requirements-dev.txt && cd ..
 
 python scripts/check.py                                 # 六套检查，末尾给 PASS/FAIL 与总项数
+python scripts/check.py --live                          # 再跑 7 项端到端（真起 uvicorn，约 8 秒）
 engine/asr/venv/Scripts/python.exe bench/asr_bench.py    # 打印线程数与耗时的 Markdown 表
 ```
 
@@ -210,8 +211,11 @@ engine/asr/venv/Scripts/python.exe bench/asr_bench.py    # 打印线程数与耗
 各套检查分别在测什么：
 
 ```bash
-# 协议层：契约 + 分路超时 + 错误映射 + trace 透传 + SSE 断开释放
+# 协议层：契约 + 分路超时 + 错误映射 + trace 透传 + SSE 断开释放（打桩，55 项）
 cd relay && venv/Scripts/python.exe -m pytest
+
+# 协议层端到端：真起两个 uvicorn，真走 TCP（7 项，默认不跑）
+cd relay && venv/Scripts/python.exe -m pytest -m live -v
 
 # 引擎：系统提示词、双重预算、日期注入
 cd engine/deepseek && venv/Scripts/python.exe -m pytest
@@ -409,7 +413,7 @@ dev.py start.bat        一键启动
 
 **确实还没做**
 
-- **协议层的行为测试全在打桩层**。分路超时取值、上游异常映射、`X-Trace-Id` 透传、SSE 断开时上游连接是否释放——这四类共 49 项，都用 `httpx.MockTransport` 把上游替换掉。打桩能证明"决策逻辑是对的"，不能证明"接上真实 uvicorn 也这样"。首块重试那一条是手工起服务验过的（服务端日志逐条对应、响应 trace 一致、三块分别落在 +0.17 / +0.47 / +0.79 秒，间隔与上游节奏一致），其余靠打桩。 → 加一组标了 `-m live` 的端到端用例，起真实 uvicorn 跑三条链路；代价是测试从 0.2 秒变成几十秒，所以默认不跑。
+- **端到端只覆盖到"两个进程都在本机"**。`relay/tests/test_live.py` 那 7 项确实起真 uvicorn、真走 TCP：SSE 逐块到达（首末块间隔 ≥0.25 秒，被缓冲就会失败）、首块前断开会重试且两跳 trace 一致、首块后断开不重试、200 但零字节也重试、读超时映射成 504、响应头与上游收到的 trace 对齐、客户端断开后上游生成器被取消。边界止于此：**不接真实模型层、不过 TLS 与反代、不跨机器**。 → 下一步是接真实 8000 引擎跑一条完整链路；代价是这组用例会依赖 1.8GB 权重和远程 API key，就不能再作为"clone 下来就能跑"的检查了，所以现在这样切分是有意的。
 - **有首块重试，没有熔断**。瞬时失败（服务刚重启、连接抖动）能自动恢复一次，但连续失败时不会熔断——上游彻底挂掉的情况下，每个请求仍然要等满连接超时或 300 秒块间隔。 → 熔断要引入失败计数窗口与半开探测，单机单用户下收益不明显；真要做，第一步是"连续 N 次失败后 30 秒内直接快速失败"，避免重复等待。
 - **没有 CI**。Gitee Go 需额外开通。 → `scripts/check.py` 已经是一条命令跑完六套检查、失败返回非零退出码，接 CI 只差一个 yml；没接是因为单机项目里"本地一条命令"已经覆盖了绝大部分需求。
 - **没有进程守护**。某个引擎崩了不会自动拉起，要回终端看日志。 → `dev.py` 加健康轮询与重启，或交给 systemd / supervisord。

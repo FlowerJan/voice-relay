@@ -11,7 +11,8 @@
 
 **用法：**
 
-    python scripts/check.py            # 全部
+    python scripts/check.py            # 全部（不含端到端）
+    python scripts/check.py --live     # 再跑一组真起 uvicorn 的端到端用例
     python scripts/check.py --only relay,view
     python scripts/check.py -v         # 成功项也打印输出
 
@@ -88,6 +89,17 @@ CHECKS: list[Check] = [
     ),
 ]
 
+# 端到端用例单独一项、默认不跑。理由不是"跑不了"：它要起两个 uvicorn 进程、
+# 等端口、真等一次读超时，十几秒起步，而上面六套加起来只要 6 秒。把它塞进
+# 默认列表的后果是"改一行等二十秒"，人就会开始跳过检查。
+# 但它必须存在、且能被一条命令叫出来，否则等于没有。
+LIVE_CHECK = Check(
+    "live",
+    "协议层：端到端（真起 uvicorn 与上游，7 项）",
+    f'"{PY_RELAY}" -m pytest -q -m live',
+    ROOT / "relay",
+)
+
 
 def run(check: Check, verbose: bool) -> tuple[bool, str, int]:
     env = dict(os.environ)
@@ -129,12 +141,19 @@ def run(check: Check, verbose: bool) -> tuple[bool, str, int]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="跑完所有检查并汇总")
-    parser.add_argument("--only", default="", help="只跑指定项，逗号分隔（relay,prompt,extract,session,tts,types）")
+    parser.add_argument(
+        "--only", default="",
+        help="只跑指定项，逗号分隔（relay,prompt,extract,session,tts,types,live）")
+    parser.add_argument(
+        "--live", action="store_true",
+        help="额外跑端到端用例（真起 uvicorn，约 10 秒）")
     parser.add_argument("-v", "--verbose", action="store_true", help="成功项也打印输出")
     args = parser.parse_args()
 
     wanted = {item.strip() for item in args.only.split(",") if item.strip()}
     selected = [c for c in CHECKS if not wanted or c.key in wanted]
+    if "live" in wanted or (args.live and not wanted):
+        selected.append(LIVE_CHECK)
     if not selected:
         print(f"没有匹配的检查项：{args.only}", file=sys.stderr)
         return 2
