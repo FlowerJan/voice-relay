@@ -114,34 +114,54 @@ def system_content() -> str:
     return SYSTEM_PROMPT + _today_note()
 
 
-def build_messages(history: List) -> List[Dict]:
-    """加 system，并按**双重预算**裁剪历史：条数上限 + token 总量上限。
+def _usable(m) -> bool:
+    """这条消息值不值得发给模型。
+
+    system 不算：客户端禁带 system，后端统一加（否则任何人都能改人设和边界）。
+    空内容也不算：前端等首字节时会留一个空的 assistant 占位，重试时也可能
+    残留空消息，喂给模型只会让它困惑「你想让我回什么」。
+    """
+    if m.role == "system":
+        return False
+    content = m.content
+    if isinstance(content, str):
+        return bool(content.strip())
+    return bool(content)
+
+
+def build_messages_with_stats(history: List) -> tuple[List[Dict], Dict[str, int]]:
+    """加 system、按**双重预算**裁剪历史，并把"裁掉了多少条"一起回报。
 
     两道限制缺一不可：条数挡住零碎消息堆积，token 挡住少数几条超长消息撑爆窗口。
     content 可能是纯文本，也可能是多模态 parts 数组（带图的消息）。
+
+    **为什么要把裁剪条数回报出去**：这两道预算都会丢消息，而丢消息属于
+    「用户能感知、却看不到原因」的故障——表现为"它怎么忘了我刚说的"，
+    从外部完全无法反推是预算裁掉了。裁剪本身是产品决策，静默裁剪不是，
+    所以数字要一路带到 done 事件里，由前端明说。
+
+    先剔无效消息再取最近 N 条（顺序不能反）：反过来会让几条空占位
+    白占掉同样多的名额，等于凭空少看几轮真历史。
     """
-    cleaned: List = []
-    for m in history[-settings.history_limit:]:
-        if m.role == "system":
-            continue  # 客户端禁带 system，后端统一加
-        content = m.content
-        if isinstance(content, str):
-            if not content.strip():
-                continue  # 跳过空消息（前端占位符残留）
-        elif not content:
-            continue
-        cleaned.append(m)
+    usable: List = [m for m in history if _usable(m)]
+    kept = _fit_budget(usable[-settings.history_limit:], settings.history_token_budget)
 
     messages: List[Dict] = [{"role": "system", "content": system_content()}]
-    for m in _fit_budget(cleaned, settings.history_token_budget):
+    for m in kept:
         messages.append({"role": m.role, "content": m.content})
-    return messages
+
+    return messages, {"history_used": len(kept), "history_dropped": len(usable) - len(kept)}
+
+
+def build_messages(history: List) -> List[Dict]:
+    """只关心消息、不关心统计时的入口（测试与既有调用方沿用）。"""
+    return build_messages_with_stats(history)[0]
 
 
 async def stream_chat(history: List) -> AsyncIterator[Dict]:
     """异步生成 SSE 事件字典。异常全部吞掉并转为 error 事件，不抛给上层。"""
     client = get_client()
-    messages = build_messages(history)
+    messages, stats = build_messages_with_stats(history)
     finish_reason = "stop"
     try:
         stream = await client.chat.completions.create(
@@ -163,8 +183,15 @@ async def stream_chat(history: List) -> AsyncIterator[Dict]:
                 yield {"type": REASONING, "content": delta.reasoning_content}
             if delta.content:
                 yield {"type": DELTA, "content": delta.content}
-        # reason=length 表示达到 max_tokens 上限，正文被截断，前端需提示用户
-        yield {"type": DONE, "reason": finish_reason}
+        # reason=length 表示达到 max_tokens 上限，正文被截断，前端需提示用户。
+        # history_* 是本轮真实发给模型的历史条数：裁剪若悄悄发生，用户只会感到
+        # "它忘了我刚说的"，所以这个数字必须跟着 done 一起送出去。
+        yield {
+            "type": DONE,
+            "reason": finish_reason,
+            "history_used": stats["history_used"],
+            "history_dropped": stats["history_dropped"],
+        }
     except BadRequestError as e:
         # 400 是"请求本身不合法"：图片格式不对、体积超限、part 结构写错。
         # 必须排在 APIError 之前——否则会被下面那条误报成"密钥无效"，

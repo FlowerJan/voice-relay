@@ -262,6 +262,13 @@ async function openZoom(img: MsgImage) {
             回答达到长度上限被截断，以上内容不完整
           </div>
 
+          <!-- 和上一条刻意分成两种样式：截断是"这次回答不完整"（警告），
+               历史裁剪是"它当时就没看到那些对话"（中性说明）。混成一个黄色警告条，
+               会让人以为出了故障，实际上这是设计好的预算取舍。 -->
+          <div v-if="m.historyDropped" class="hint">
+            本次回答没有看到更早的 {{ m.historyDropped }} 条对话（超出上下文预算）
+          </div>
+
           <div v-if="m.content || m.error || m.images?.length || m.docs?.length" class="msg-ops">
             <template v-if="m.role === 'user'">
               <button class="op" :disabled="isStreaming" @click="startEdit(i, m.content)">编辑</button>
@@ -517,6 +524,17 @@ async function openZoom(img: MsgImage) {
   background: #fffbeb;
   border: 1px solid #fde68a;
   color: #92400e;
+  font-size: 12px;
+}
+
+/* 历史裁剪用中性色：不是故障，是预算取舍，只是必须让用户知道。 */
+.hint {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  color: #64748b;
   font-size: 12px;
 }
 

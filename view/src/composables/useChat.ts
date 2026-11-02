@@ -45,6 +45,14 @@ export interface Message {
   reasoning?: string
   error?: boolean
   truncated?: boolean
+  /**
+   * 这一轮被裁掉的更早历史条数（来自 done 事件，0/未定义表示没裁）。
+   *
+   * 为什么要存进消息里而不是临时提示：它是**这一轮回答的事实**——"我当时只看到
+   * 这些上下文"。刷新、切会话、导出之后仍然成立，所以跟着消息一起持久化。
+   * 只放一个全局 toast，用户重看这段对话时会以为模型当年看到了全部。
+   */
+  historyDropped?: number
 }
 
 /** 统一的消息构造入口：任何新消息都必须带 id，避免某个 push 漏了。 */
@@ -189,9 +197,13 @@ export function useChat(getMessages: () => Message[]) {
             m.content += c
             thinking.value = false
           },
-          onDone: (reason) => {
+          onDone: (reason, stats) => {
             const m = messages[idx]
-            if (m && reason === 'length') m.truncated = true
+            if (!m) return
+            if (reason === 'length') m.truncated = true
+            // 裁掉了历史就必须说：模型"忘事"的真实原因在这里，
+            // 不写进消息的话，用户只能归因成"它变笨了"。
+            if (stats.dropped > 0) m.historyDropped = stats.dropped
           },
           onError: (msg) => {
             const m = messages[idx]

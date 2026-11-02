@@ -90,6 +90,10 @@ export function parseStoredSessions(raw: string | null): Session[] | null {
           if (typeof (m as Message).reasoning === 'string') o.reasoning = (m as Message).reasoning
           if ((m as Message).error) o.error = true
           if ((m as Message).truncated) o.truncated = true
+          // 裁剪条数是这一轮回答的事实，要跟着消息存：重新打开会话时
+          // 仍然该看得到"当时模型只看到这么多上下文"。
+          const dropped = Number((m as Message).historyDropped)
+          if (dropped > 0) o.historyDropped = dropped
           // 图片只校验 thumb 和 id：原图在 IndexedDB，可能已被清掉，
           // 这时缩略图仍能显示，不至于整条消息作废。
           const imgs = (m as Message).images

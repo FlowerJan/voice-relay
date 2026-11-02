@@ -9,6 +9,9 @@
 2. 裁剪是双重预算：条数上限 + token 总量，且**最后一条无论如何保留**；
 3. 图片必须计入 token 成本——不计的话，两条带图长消息会被误判成"装得下"。
 
+外加一条后来补的：**裁掉了多少条必须回报**（`history_dropped`）。裁剪是产品决策，
+静默裁剪不是——用户会把"模型忘事"归因成模型变笨，而所有日志都正常。
+
 为什么是"估算"而不是真分词：预算只是为了不撞上下文上限，不需要精确。
 方向是**宁可高估**，因为低估的后果是请求真的失败。
 """
@@ -25,6 +28,7 @@ from app.services.chat_service import (
     _fit_budget,
     _text_tokens,
     build_messages,
+    build_messages_with_stats,
     system_content,
 )
 
@@ -199,3 +203,76 @@ def test_image_cost_can_change_what_fits(budget):
     )
 
     assert len(messages) == 3, "system + 最新一条长消息 + 中间那条短回答"
+
+
+# ---------------- 裁剪统计 ----------------
+#
+# 这几条测的不是"裁得对不对"，而是"裁了之后说不说"。数字错了不会崩，
+# 只会让用户在模型忘事时得到一句谎话：界面上什么都没提示。
+
+
+def test_stats_report_nothing_dropped_when_everything_fits(budget):
+    budget(limit=20, tokens=32000)
+    _, stats = build_messages_with_stats([msg("user", "第一句"), msg("assistant", "回答")])
+
+    assert stats == {"history_used": 2, "history_dropped": 0}
+
+
+def test_stats_count_messages_cut_by_the_limit(budget):
+    """条数上限裁掉的必须计入——这是最常见的静默裁剪。"""
+    budget(limit=5)
+    _, stats = build_messages_with_stats([msg("user", f"第{i}句") for i in range(25)])
+
+    assert stats["history_used"] == 5
+    assert stats["history_dropped"] == 20
+
+
+def test_stats_count_messages_cut_by_the_token_budget(budget):
+    """token 预算裁掉的同样要计入：两道闸的后果对用户是同一个。"""
+    budget(limit=20, tokens=250)
+    _, stats = build_messages_with_stats([msg("user", long_text(100)) for _ in range(5)])
+
+    assert stats["history_used"] == 2
+    assert stats["history_dropped"] == 3
+
+
+def test_stats_do_not_count_empty_placeholders_as_dropped(budget):
+    """空占位不是"被裁掉的历史"。
+
+    前端等首字节时留的空 assistant、重试残留的空消息，本来就不该发给模型。
+    把它们算进 dropped，界面就会对用户说"省略了 3 条对话"，而真正被丢掉的
+    只有 1 条——这种虚报会让提示本身失去可信度。
+    """
+    budget(limit=20, tokens=32000)
+    _, stats = build_messages_with_stats(
+        [
+            msg("user", "第一句"),
+            msg("assistant", ""),
+            msg("user", "   "),
+            msg("system", "客户端塞的"),
+            msg("user", "第二句"),
+        ]
+    )
+
+    assert stats == {"history_used": 2, "history_dropped": 0}
+
+
+def test_empty_placeholders_do_not_eat_the_limit(budget):
+    """先剔空消息、再取最近 N 条。
+
+    顺序反了（先切片再过滤）的后果：5 条空占位白占 5 个名额，
+    等于凭空少看几轮真历史——而 stats 还会说"一条没裁"，更难查。
+    """
+    budget(limit=3)
+    _, stats = build_messages_with_stats(
+        [
+            msg("user", "最早"),
+            msg("assistant", ""),
+            msg("user", "中间"),
+            msg("assistant", "   "),
+            msg("user", "最近"),
+        ]
+    )
+
+    assert stats["history_used"] == 3, "三条真历史都该在（空占位不算名额）"
+    assert stats["history_dropped"] == 0

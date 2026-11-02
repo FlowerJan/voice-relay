@@ -281,4 +281,23 @@ ok('重载后附件还在', back?.[0].messages[0].docs?.[0].name === 'report.pdf
 ok('附件正文完整保留', back?.[0].messages[0].docs?.[0].text.length === 20)
 ok('缺正文的附件被丢弃', back?.[0].messages[1].docs === undefined)
 
+// 16. 裁剪条数要跟着消息存档，否则刷新后那句"没看到 N 条对话"就消失了
+const storedDrop = JSON.stringify([
+  {
+    id: 's2',
+    title: '长会话',
+    createdAt: 1,
+    updatedAt: 2,
+    messages: [
+      { id: 'm1', role: 'assistant', content: '答', historyDropped: 7 },
+      { id: 'm2', role: 'assistant', content: '答2', historyDropped: 0 },
+      { id: 'm3', role: 'assistant', content: '答3', historyDropped: -3 },
+    ],
+  },
+])
+const dropBack = parse2(storedDrop)
+ok('裁剪条数存档后仍在', dropBack?.[0].messages[0].historyDropped === 7)
+ok('0 不写进存档（没裁就不占字段）', dropBack?.[0].messages[1].historyDropped === undefined)
+ok('负数被忽略（脏数据不该造出"省略 -3 条"）', dropBack?.[0].messages[2].historyDropped === undefined)
+
 console.log(`\n${pass} 项通过`)

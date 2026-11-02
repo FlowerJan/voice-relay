@@ -1,12 +1,23 @@
 {
   "$comment": "聊天 SSE 事件契约：引擎只能发这里列出的类型，前端必须全部处理。新增或改名时先改这个文件，两侧的契约测试会同时失败提醒。",
-  "version": 1,
+  "version": 2,
   "events": {
     "reasoning": "思维链增量。字段 content",
     "delta": "正文增量。字段 content",
-    "done": "正常结束。字段 reason：stop 正常 / length 被 max_tokens 截断",
+    "done": "正常结束。字段 reason：stop 正常 / length 被 max_tokens 截断；history_used、history_dropped：本轮实际发给模型的历史条数、被预算裁掉的条数",
     "error": "错误。字段 message，已翻译成人话"
   },
+  "payloads": {
+    "reasoning": { "content": "str" },
+    "delta": { "content": "str" },
+    "done": { "reason": "str", "history_used": "int", "history_dropped": "int" },
+    "error": { "message": "str" }
+  },
+  "payload_rules": [
+    "字段集合必须与 payloads 完全一致（除 type 外）：不许多，也不许少。要加字段先改这个文件，AST 测试会把违规的 yield 点报出来。",
+    "类型只区分 str / int。契约要的是形状，不是完整 JSON Schema —— 约束过细会因为改一个默认值就红一片，最后没人当真。",
+    "done 的两个 history_* 字段是给用户看的，不是给日志看的：history_dropped > 0 时前端必须提示「已省略 N 条更早的对话」，否则就是静默丢失上下文。"
+  ],
   "not_events": [
     "OpenAI 原始 chunk 结构不外泄：引擎负责把它归一成上面四种，前端不需要知道 choices/delta 长什么样"
   ]

@@ -33,11 +33,19 @@ export function toApiMessages(
   })
 }
 
+/** done 事件携带的裁剪统计。两个数字都是"条"，不是 token。 */
+export interface DoneStats {
+  /** 本轮实际发给模型的历史消息条数（不含 system） */
+  used: number
+  /** 被条数上限或 token 预算裁掉的条数。0 表示一轮没丢 */
+  dropped: number
+}
+
 export interface StreamCallbacks {
   onDelta: (content: string) => void
   onReasoning: (content: string) => void
   /** reason: 'stop' 正常结束；'length' 达到 max_tokens 被截断 */
-  onDone: (reason: string) => void
+  onDone: (reason: string, stats: DoneStats) => void
   onError: (message: string) => void
 }
 
@@ -88,7 +96,13 @@ export async function streamChat(
         const data = JSON.parse(json)
         if (data.type === 'delta') callbacks.onDelta(data.content)
         else if (data.type === 'reasoning') callbacks.onReasoning(data.content)
-        else if (data.type === 'done') callbacks.onDone(data.reason ?? 'stop')
+        else if (data.type === 'done')
+          // 裁剪统计允许缺失（老引擎不发这两个字段），缺失按 0 处理：
+          // 宁可少提示一句，也不能因为读不到字段就整轮报错。
+          callbacks.onDone(data.reason ?? 'stop', {
+            used: Number(data.history_used) || 0,
+            dropped: Number(data.history_dropped) || 0,
+          })
         else if (data.type === 'error') callbacks.onError(data.message)
       } catch {
         // 忽略解析失败的单帧
