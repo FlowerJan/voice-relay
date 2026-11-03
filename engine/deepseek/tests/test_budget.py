@@ -21,7 +21,7 @@ from datetime import date
 import pytest
 
 from app.config import SYSTEM_PROMPT, settings
-from app.schemas import ChatMessage
+from app.schemas import ChatMessage, DocAttachment
 from app.services.chat_service import (
     _IMAGE_TOKEN_ESTIMATE,
     _content_tokens,
@@ -215,7 +215,7 @@ def test_stats_report_nothing_dropped_when_everything_fits(budget):
     budget(limit=20, tokens=32000)
     _, stats = build_messages_with_stats([msg("user", "第一句"), msg("assistant", "回答")])
 
-    assert stats == {"history_used": 2, "history_dropped": 0}
+    assert stats == {"history_used": 2, "history_dropped": 0, "history_dropped_chars": 0}
 
 
 def test_stats_count_messages_cut_by_the_limit(budget):
@@ -225,6 +225,9 @@ def test_stats_count_messages_cut_by_the_limit(budget):
 
     assert stats["history_used"] == 5
     assert stats["history_dropped"] == 20
+    # 20 条 × "第N句"（3~4 字）：字符数必须真的反映"丢了多大一堆话"，
+    # 而不是跟条数一样只回一个 20。
+    assert stats["history_dropped_chars"] == sum(len(f"第{i}句") for i in range(20))
 
 
 def test_stats_count_messages_cut_by_the_token_budget(budget):
@@ -234,6 +237,7 @@ def test_stats_count_messages_cut_by_the_token_budget(budget):
 
     assert stats["history_used"] == 2
     assert stats["history_dropped"] == 3
+    assert stats["history_dropped_chars"] == 3 * len(long_text(100))
 
 
 def test_stats_do_not_count_empty_placeholders_as_dropped(budget):
@@ -254,7 +258,31 @@ def test_stats_do_not_count_empty_placeholders_as_dropped(budget):
         ]
     )
 
-    assert stats == {"history_used": 2, "history_dropped": 0}
+    assert stats == {"history_used": 2, "history_dropped": 0, "history_dropped_chars": 0}
+
+
+def test_dropped_chars_count_the_document_body_not_just_the_name(budget):
+    """被裁掉的附件，损失要按正文算，不能只算一个文件名。
+
+    这是"条数不携带信息"的极端例子：一条三万字文档被整条砍掉，条数是 1。
+    按 usable 里的 content 算的话，这份文档只值几十个字——提示会告诉用户
+    "省略了 1 条（约 12 字）"，而实际丢了整份材料。
+    """
+    budget(limit=1)
+    body = "字" * 30000
+    history = [
+        ChatMessage(
+            role="user",
+            content="读一下这份文档",
+            docs=[DocAttachment(name="财报.pdf", meta="PDF，3 页", body=body)],
+        ),
+        msg("user", "第二个问题"),
+    ]
+
+    _, stats = build_messages_with_stats(history)
+
+    assert stats["history_dropped"] == 1
+    assert stats["history_dropped_chars"] >= 30000, stats
 
 
 def test_empty_placeholders_do_not_eat_the_limit(budget):

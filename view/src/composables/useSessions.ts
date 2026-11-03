@@ -88,12 +88,21 @@ export function parseStoredSessions(raw: string | null): Session[] | null {
             content: String(m.content ?? ''),
           }
           if (typeof (m as Message).reasoning === 'string') o.reasoning = (m as Message).reasoning
-          if ((m as Message).error) o.error = true
+          if ((m as Message).error) {
+            o.error = true
+            // 建议也要跟着存档：刷新后错误气泡还在（重试按钮还在），
+            // 但"确认 8000 端口在跑着"那句话没了，等于同一个错误信息量减半。
+            const hint = (m as Message).errorHint
+            if (typeof hint === 'string' && hint.trim()) o.errorHint = hint
+          }
           if ((m as Message).truncated) o.truncated = true
           // 裁剪条数是这一轮回答的事实，要跟着消息存：重新打开会话时
           // 仍然该看得到"当时模型只看到这么多上下文"。
           const dropped = Number((m as Message).historyDropped)
           if (dropped > 0) o.historyDropped = dropped
+          // 字数跟着一起存：它是"损失有多大"的唯一线索，丢了就只剩一个条数。
+          const droppedChars = Number((m as Message).historyDroppedChars)
+          if (droppedChars > 0) o.historyDroppedChars = droppedChars
           // 图片只校验 thumb 和 id：原图在 IndexedDB，可能已被清掉，
           // 这时缩略图仍能显示，不至于整条消息作废。
           const imgs = (m as Message).images

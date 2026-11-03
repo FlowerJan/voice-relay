@@ -21,7 +21,9 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.body import BodyTooLarge, read_body
 from app.config import settings
+from app.errors import error_response as _err
 from app.middleware import TRACE_HEADER, get_trace_id
 from app.upstream import get_client
 
@@ -40,20 +42,6 @@ class _UpstreamRejected(Exception):
 
 class _UpstreamNeverSpoke(Exception):
     """上游回了 200 却一个字节没写就断开——等价于"还没开始说话"，可以重试。"""
-
-
-def _err(status: int, code: str, message: str):
-    return JSONResponse(
-        status_code=status,
-        content={
-            "error": {
-                "code": code,
-                "message": message,
-                "status": status,
-                "trace_id": get_trace_id(),
-            }
-        },
-    )
 
 
 def _classify(exc: Exception) -> tuple[int, str, str]:
@@ -98,6 +86,13 @@ async def _open_stream(
     except StopAsyncIteration:
         await upstream.aclose()
         raise _UpstreamNeverSpoke("聊天服务未返回任何数据") from None
+    except BaseException:
+        # 首块读取本身失败：ReadError、协议错误、或者客户端在这期间取消了请求。
+        # 这条路径必须显式关闭——重试会重新开一条连接，漏掉的那条要等 GC 才释放，
+        # 而每次重试都漏一条，正好是"上游拒连 → 不断重试 → 句柄越来越多"的成因。
+        # 用 BaseException 而不是 Exception：CancelledError 也必须走到这里。
+        await upstream.aclose()
+        raise
 
     if not first:
         # 空块不携带任何 SSE 事件，等价于上游还没开始说话
@@ -109,7 +104,13 @@ async def _open_stream(
 
 @router.post("/api/chat/stream")
 async def chat_stream(request: Request):
-    body = await request.body()
+    # 上限检查必须在任何转发之前：这条 body 里可能装着 base64 图片，
+    # 一个不设限的 `await request.body()` 就是"谁都能一行命令打死这个进程"。
+    try:
+        body = await read_body(request, settings.chat_max_body)
+    except BodyTooLarge as e:
+        return _err(413, "chat_body_too_large", e.message)
+
     client = get_client()
 
     # 聊天是远程流式，可能说很久：

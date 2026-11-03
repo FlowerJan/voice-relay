@@ -223,9 +223,11 @@ def error_of(response) -> dict:
         payload = json.loads(response.body)
     assert set(payload) == {"error"}, f"错误体顶层应该只有一个 error 键，实际：{payload}"
     error = payload["error"]
-    assert set(error) == {"code", "message", "status", "trace_id"}, f"错误体字段不对：{error}"
+    assert set(error) == {"code", "message", "hint", "status", "trace_id"}, f"错误体字段不对：{error}"
     assert isinstance(error["code"], str) and error["code"]
     assert isinstance(error["message"], str) and error["message"]
+    # hint 是这个形状里唯一"给用户看的动作"：空串等于没写，前端会渲染成一条空行。
+    assert isinstance(error["hint"], str) and error["hint"].strip(), f"缺可执行建议：{error}"
     assert isinstance(error["status"], int)
     assert isinstance(error["trace_id"], str) and error["trace_id"]
     return error

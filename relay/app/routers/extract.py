@@ -10,27 +10,14 @@ pymupdf 自带 onnxruntime，装上就是几十 MB 的依赖。协议层要一�
 """
 import httpx
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
 
+from app.body import declared_too_large, limit_text
 from app.config import settings
+from app.errors import error_response as _err
 from app.middleware import TRACE_HEADER, get_trace_id
 from app.upstream import get_client
 
 router = APIRouter()
-
-
-def _err(status: int, code: str, message: str):
-    return JSONResponse(
-        status_code=status,
-        content={
-            "error": {
-                "code": code,
-                "message": message,
-                "status": status,
-                "trace_id": get_trace_id(),
-            }
-        },
-    )
 
 
 @router.post("/api/extract")
@@ -38,6 +25,16 @@ async def extract(request: Request):
     content_type = request.headers.get("content-type", "")
     if not content_type.startswith("multipart/form-data"):
         return _err(400, "bad_request", "需要 multipart/form-data 上传文件")
+
+    # 这条链路也是边收边转。上限比 20MB 文件的限额多留 4MB：
+    # multipart 的头、boundary、字段名都算在 body 里，卡死 20MB 会把
+    # 刚好 20MB 的合法文件一起拒掉。
+    if declared_too_large(request, settings.extract_max_body):
+        return _err(
+            413,
+            "extract_body_too_large",
+            f"请求体超过 {limit_text(settings.extract_max_body)} 上限（文件本身限 20MB）",
+        )
 
     client = get_client()
     headers = {"Content-Type": content_type, TRACE_HEADER: get_trace_id()}

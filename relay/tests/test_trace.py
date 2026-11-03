@@ -8,9 +8,17 @@
   如果在后端查不到，这个机制就是摆设。
 """
 import asyncio
+import logging
+from pathlib import Path
 
 import httpx
 import pytest
+from starlette.applications import Starlette
+from starlette.responses import StreamingResponse
+from starlette.routing import Route
+
+from app.middleware import TraceIdMiddleware, get_trace_id
+from app.trace import LOG_FORMAT, TraceFormatter
 
 from conftest import RecordedStream
 
@@ -107,3 +115,114 @@ async def test_asr_success_body_echoes_trace(api, upstream):
     payload = response.json()
     assert payload["text"] == "你好"
     assert payload["trace_id"] == response.headers[TRACE_HEADER]
+
+
+# ---------------- 第二层：ID 落到日志里，而不只是落到响应头 —----------------
+#
+# 上面全部通过，也只能说明"ID 在传递"。可观测性缺的不是传，是**落地**：
+# 日志格式里没有这个字段时，拿 trace_id 去 grep 一处也对不上，
+# 前面这些断言全部白做。
+
+
+def test_formatter_fills_trace_for_records_without_it():
+    """没有 trace 属性的记录也不能炸。
+
+    logging 的行为是：格式串里的字段取不到就抛 KeyError，然后**整条日志消失**。
+    所以兜底必须在 Formatter 里，而不是给 handler 挂 filter——filter 漏挂一个
+    handler 就是"这批日志凭空没了"，比格式难看难查得多。
+    """
+    formatter = TraceFormatter(LOG_FORMAT)
+    record = logging.LogRecord("t", logging.INFO, __file__, 1, "hello", None, None)
+
+    assert "hello" in formatter.format(record)
+
+
+async def test_trace_is_still_set_while_streaming():
+    """流式 body 在中间件返回之后才产出，ID 必须还在。
+
+    这条守的是**结果**，不是某种实现：实测在 `finally` 里 reset 也不会丢
+    （Starlette 创建响应任务时复制了上下文，ASGITransport 与真实 uvicorn 都验过）。
+    留着它是因为——哪天有人把中间件换成纯 ASGI 实现、或改掉响应包装方式，
+    "流内日志拿不到 ID"会静默发生，而那时 trace_id 就只剩响应头这一个用途了。
+    """
+
+    async def endpoint(request):
+        async def body():
+            yield get_trace_id().encode()
+
+        return StreamingResponse(body(), media_type="text/plain")
+
+    app = Starlette(routes=[Route("/s", endpoint)])
+    app.add_middleware(TraceIdMiddleware)
+
+    # 用合法形态的 ID：中间件只沿用"自己会生成的那种"（16 位十六进制），
+    # 随便一串字符会被换掉——那条规则在 test_resilience 里单独钉住，
+    # 这条测的是"流内上下文有没有丢"，两件事不该混在一个断言里。
+    given = "abc1234567890def"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://t"
+    ) as client:
+        response = await client.get("/s", headers={TRACE_HEADER: given})
+
+    assert response.text == given, f"流内看到的 trace 是 {response.text!r}"
+    assert response.headers[TRACE_HEADER] == given
+
+
+async def test_request_line_carries_the_trace(api, upstream):
+    """relay 自己的请求行必须带 trace，而且要在 reset **之前**打。
+
+    踩过的点：这行如果放在 finally 之后，上下文变量已经还原成 "-"，日志照样
+    一行不少、看着一切正常，但拿 trace 去 grep 一条都搜不到。所以断言的是
+    **格式化后的整行**里包含这个 ID，而不是"有没有日志"。
+    """
+    lines: list[str] = []
+
+    class Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            lines.append(TraceFormatter(LOG_FORMAT).format(record))
+
+    handler = Collect()
+    target = logging.getLogger("app.middleware")
+    target.addHandler(handler)
+    # pytest 里 root 的默认级别是 WARNING，INFO 会被直接丢掉；生产环境由
+    # trace.configure() 把 root 设成 INFO，所以这里补上同样的前提。
+    target.setLevel(logging.INFO)
+    try:
+        upstream.streamed([b"data: x\n\n"])
+        response = await api.post(
+            "/api/chat/stream", json={}, headers={TRACE_HEADER: "feedfacecafebeef"}
+        )
+    finally:
+        target.removeHandler(handler)
+        target.setLevel(logging.NOTSET)
+
+    trace = response.headers[TRACE_HEADER]
+    assert any(
+        trace in line and "/api/chat/stream" in line for line in lines
+    ), f"请求行里没有 trace：{lines}"
+
+
+def test_every_service_reads_the_header_and_logs_it():
+    """三个下游都要真接上，否则"四跳可观测"只是说法。
+
+    这里是静态检查，但不是为了省事：把三个服务真起一遍要几十秒，而这条约束
+    失败的方式只有一种——"某个服务忘了接"。静态检查恰好完整覆盖它。
+    """
+    root = Path(__file__).resolve().parents[2]
+
+    for service, entry in (
+        ("engine/asr", "app/server.py"),
+        ("engine/tts", "app/server.py"),
+        ("engine/deepseek", "app/main.py"),
+    ):
+        assert (root / service / "app" / "trace.py").is_file(), (
+            f"{service} 没有 trace.py：它读不到 X-Trace-Id"
+        )
+        source = (root / service / entry).read_text(encoding="utf-8")
+        assert "trace.configure()" in source, f"{service} 没有装带 trace 的日志格式"
+        assert "TraceMiddleware" in source, f"{service} 没装中间件，收到的 ID 无处可去"
+
+    # 格式串里必须有 %(trace)s：配了格式却漏字段，等于什么都没做。
+    for path in sorted(root.glob("engine/*/app/trace.py")):
+        assert "%(trace)s" in path.read_text(encoding="utf-8"), path
+    assert "%(trace)s" in (root / "relay" / "app" / "trace.py").read_text(encoding="utf-8")

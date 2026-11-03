@@ -12,12 +12,15 @@ export function useBalance() {
     try {
       const data = await fetchBalance()
       if (data.ok === false) {
-        error.value = data.message ?? '余额获取失败'
+        // 建议挂进同一句：这里只有一个行内位置，分成两行会被挤成省略号。
+        error.value = data.hint
+          ? `${data.message ?? '余额获取失败'}。${data.hint}`
+          : data.message ?? '余额获取失败'
       } else {
         balance.value = data
       }
     } catch {
-      error.value = '余额获取失败'
+      error.value = '余额获取失败。余额只是展示，不影响继续对话；点 ↻ 再试一次'
     } finally {
       loading.value = false
     }

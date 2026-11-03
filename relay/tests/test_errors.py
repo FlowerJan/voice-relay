@@ -1,18 +1,21 @@
 """错误收口：无论上游怎么错，用户只看到一种形状。
 
-    {"error": {"code", "message", "status", "trace_id"}}
+    {"error": {"code", "message", "hint", "status", "trace_id"}}
 
 这条约束是协议层第二个存在理由。没有它，前端要为每条链路写一套错误处理，
 而且"上游返回了 500 的 HTML"这种最常见的情况会直接把解析器搞崩。
 
-这里覆盖的不只是"错了变什么码"，还有两个更细的决定：
-- 上游已是统一格式 → 透传，只补 trace_id，不重新包装（否则 message 被吞掉）
+这里覆盖的不只是"错了变什么码"，还有三个更细的决定：
+- 上游已是统一格式 → 透传，只补 trace_id 与 hint，不重新包装（否则 message 被吞掉）
 - 上游不是 JSON → 包一层，把原始文本截断后带上（否则排查时只剩 "500"）
+- 每个码都要配一句**能照着做**的建议（hint）：message 说"哪里坏了"，
+  hint 说"现在做什么"。只有前者的话，界面上的错误和"出错了"三个字没有区别。
 """
 import httpx
 import pytest
 
 from app.config import settings
+from app.errors import GENERIC_HINT, hint_for
 from app.routers.asr import asr
 from app.routers.chat import chat_stream
 from app.routers.extract import extract
@@ -159,6 +162,8 @@ async def test_asr_passes_through_envelope_and_fills_trace(upstream):
     assert error["code"] == "bad_audio", "下游的错误码不该被改写"
     assert error["message"] == "音频格式不支持"
     assert error["trace_id"], "透传时必须补上 trace_id，否则跨跳排查断链"
+    # 下游只说了"格式不支持"，没说"那我该怎么办"——建议由我们这一层补。
+    assert "录" in error["hint"] or "换" in error["hint"]
 
 
 async def test_asr_wraps_plain_text_error(upstream):
@@ -277,3 +282,64 @@ async def test_every_failure_has_the_same_shape(upstream):
         assert error["status"] == response.status_code, "错误体里的 status 必须与 HTTP 状态码一致"
 
     assert all(shape == shapes[0] for shape in shapes), f"错误体形状不一致：{shapes}"
+
+
+# ---------------- 建议（hint） ----------------
+
+
+async def test_every_failure_path_has_a_tailored_hint(upstream):
+    """每条真实失败路径都要有专属建议，不能落到通用兜底。
+
+    通用兜底（"重试一次，仍失败带上 trace_id"）是留给未知码的：它对任何错误都
+    成立，也正因为对任何错误都成立，对具体故障几乎没有帮助。连不上、超时、
+    下游拒绝这类每天都在发生的故障，如果也只能拿到这一句，说明映射表漏了行。
+    """
+    cases = [
+        ("chat", chat_stream, "/api/chat/stream", JSON, httpx.ConnectError("x")),
+        ("chat", chat_stream, "/api/chat/stream", JSON, httpx.ConnectTimeout("x")),
+        ("chat", chat_stream, "/api/chat/stream", JSON, httpx.ReadTimeout("x")),
+        ("asr", asr, "/api/asr", MULTIPART, httpx.ConnectError("x")),
+        ("asr", asr, "/api/asr", MULTIPART, httpx.ReadTimeout("x")),
+        ("extract", extract, "/api/extract", MULTIPART, httpx.ConnectError("x")),
+        ("extract", extract, "/api/extract", MULTIPART, httpx.ReadTimeout("x")),
+        ("tts", tts, "/api/tts", JSON, httpx.ConnectError("x")),
+        ("tts", tts, "/api/tts", JSON, httpx.ReadTimeout("x")),
+    ]
+    seen: list[tuple[str, str, str, str]] = []
+    for link, router, path, headers, exc in cases:
+        upstream.raise_(exc)
+        error = error_of(await router(await make_request(b"x", path=path, headers=headers)))
+        seen.append((link, error["code"], error["message"], error["hint"]))
+
+    weak = [item[1] for item in seen if item[3] == GENERIC_HINT]
+    assert not weak, f"这些失败没有专属建议，只落到了通用兜底：{weak}"
+
+    repeated = [item[1] for item in seen if item[3] == item[2]]
+    assert not repeated, "建议不能直接复述 message：那只是把问题说了两遍"
+
+
+async def test_upstream_rejection_also_gets_a_hint(upstream):
+    """4xx/5xx 透传路径容易被漏掉：错误码换了，映射表却没跟上。"""
+    upstream.reply(httpx.Response(429, text="rate limit exceeded"))
+    error = error_of(await chat_stream(await make_request()))
+
+    assert error["code"] == "chat_upstream_error"
+    assert error["hint"] and error["hint"] != GENERIC_HINT
+
+
+def test_unknown_code_does_not_invent_advice():
+    """未知码给通用建议，不猜。猜出来的建议比没有更糟——用户会照着做，然后发现没用。"""
+    assert hint_for("some_future_code") == GENERIC_HINT
+    # 下游自造的码（没有 asr_ 前缀）本身认不出来，靠调用方指明链路才拿到建议
+    assert hint_for("bad_audio") == GENERIC_HINT
+    assert hint_for("bad_audio", link="asr") != GENERIC_HINT
+    assert hint_for("asr_anything_new") != GENERIC_HINT
+
+
+def test_no_hint_tells_the_user_to_contact_someone():
+    """这台机器上没有"管理员"这个人。伪建议不如不写。"""
+    from app import errors
+
+    all_hints = list(errors._HINTS.values()) + list(errors._LINK_HINTS.values())
+    offenders = [h for h in all_hints if "联系" in h or "管理员" in h]
+    assert not offenders, f"这些建议没有可执行的动作：{offenders}"

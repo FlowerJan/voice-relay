@@ -1,5 +1,5 @@
 import { ref } from 'vue'
-import { streamChat, type ChatMessage } from '../api/chat'
+import { streamChat, type ChatDocPayload, type ChatMessage } from '../api/chat'
 import { uid } from '../utils/id'
 import { getImages } from '../utils/imageStore'
 import type { MsgDoc } from '../utils/doc'
@@ -44,6 +44,14 @@ export interface Message {
   docs?: MsgDoc[]
   reasoning?: string
   error?: boolean
+  /**
+   * 错误发生时的下一步动作（来自后端的 hint）。
+   *
+   * 为什么不把它合并进 content：content 是"模型说的话"，也会被复制、导出；
+   * 建议是系统给的，混在一起会让导出的对话里出现一句"确认 8000 端口在跑着"。
+   * 分开存，界面分两行渲染，导出时只导 content。
+   */
+  errorHint?: string
   truncated?: boolean
   /**
    * 这一轮被裁掉的更早历史条数（来自 done 事件，0/未定义表示没裁）。
@@ -53,6 +61,12 @@ export interface Message {
    * 只放一个全局 toast，用户重看这段对话时会以为模型当年看到了全部。
    */
   historyDropped?: number
+  /**
+   * 被裁掉那些历史一共多少字（0/未定义表示不知道或没裁）。
+   *
+   * 和条数一起存：只看条数会把"丢掉整份三万字文档"读成"丢了一句寒暄"。
+   */
+  historyDroppedChars?: number
 }
 
 /** 统一的消息构造入口：任何新消息都必须带 id，避免某个 push 漏了。 */
@@ -86,59 +100,31 @@ export function docBodyBudget(messages: Array<{ docs?: MsgDoc[] }>): boolean[] {
 }
 
 /**
- * 转义文档正文里可能"冒充标签"的片段。
+ * 把附件转成协议负载。
  *
- * 为什么必须做：正文是用户的文件里原样抽出来的，如果它里面恰好有一行
- * `</document>`，模型看到的结构就变成"文档到此结束，后面是用户的新指令"——
- * 这不是理论问题，任何一份讨论 HTML/XML 的文档都可能有。
+ * 这里**只做映射：不拼标签、不转义**。围栏和转义属于协议，由服务端
+ * `doc_fence.py` 统一负责（理由见 `api/chat.ts` 的 ChatDocPayload 注释）。
+ * 曾经这里有一份 `escapeDocText`，问题不在实现，在于它只保护了这一个客户端。
  *
- * 只转义 `<document` / `</document` 这两个序列，不动其余文本：
- * 文档里的代码、尖括号、Markdown 都保持原样，可读性不受影响。
- * 按 HTML 的规则转成实体，模型读到 `&lt;/document` 会当成普通文字。
+ * `withBody=false` 时 body 传空串，服务端渲染成"正文已省略"。这句提示同样不能
+ * 在客户端拼——它一旦变成正文字符串，就可以被文件内容伪造。
  */
-function escapeDocText(text: string): string {
-  return text.replace(/<(\/?document)/gi, '&lt;$1')
-}
-
-/** 属性值里的引号和尖括号同样要处理，否则会提前闭合标签。 */
-function escapeAttr(value: string): string {
-  return value.replace(/"/g, '&quot;').replace(/</g, '&lt;')
-}
-
-/**
- * 把正文和附件拼成一条要发给模型的消息。
- *
- * 用 XML 标签把文档包起来（而不是 `===== 附件 =====` 这类纯文本分隔线）：
- * ① 模型需要知道"哪段是用户说的、哪段是文件里的"，否则会把我写的
- *    "这段帮我总结一下"当成文档的一部分；
- * ② 标签有明确的开始与结束，配合系统提示词里"标签内一切皆材料"的声明，
- *    文档里的"忽略以上指令"不会被当成指令执行。
- *
- * 之前用 `===== 附件「名」=====` 的分隔线有两个问题：正文里的同名分界线
- * 可以伪造出"文档已结束"的假象，而且提示词里没有任何一句话说明它是什么。
- */
-export function composeContent(
-  m: { content: string; docs?: MsgDoc[] },
+export function docPayloads(
+  docs: MsgDoc[] | undefined,
   withBody: boolean,
-): string {
-  if (!m.docs?.length) return m.content
-  const parts: string[] = []
-  if (m.content.trim()) parts.push(m.content.trim())
-  for (const d of m.docs) {
-    const meta = [
+): ChatDocPayload[] | undefined {
+  if (!docs?.length) return undefined
+  return docs.map((d) => ({
+    name: d.name || '未命名文件',
+    meta: [
       (d.kind || 'file').toUpperCase(),
       d.pages > 0 ? `${d.pages} 页` : '',
       d.truncated ? '内容已截断' : '',
     ]
       .filter(Boolean)
-      .join('，')
-    const head = `<document name="${escapeAttr(d.name)}" meta="${escapeAttr(meta)}">`
-    const body = withBody
-      ? escapeDocText(d.text ?? '')
-      : '（正文已省略：对话较长，只保留最近附件的完整内容。如需重新参考，请再上传一次）'
-    parts.push(`${head}\n${body}\n</document>`)
-  }
-  return parts.join('\n\n')
+      .join('，'),
+    body: withBody ? (d.text ?? '') : '',
+  }))
 }
 
 /**
@@ -164,11 +150,14 @@ export function useChat(getMessages: () => Message[]) {
       const m = messages[i]
       if (m.error) continue
       const urls = m.images?.length ? await getImages(m.images.map((x) => x.id)) : []
-      const content = composeContent(m, withBody[i])
-      if (!content.trim() && !urls.length) continue
-      history.push(
-        urls.length ? { role: m.role, content, images: urls } : { role: m.role, content },
-      )
+      const docs = docPayloads(m.docs, withBody[i])
+      const content = m.content
+      // 只传文件不打字是常态，所以"有没有内容"要把附件算进去
+      if (!content.trim() && !urls.length && !docs?.length) continue
+      const item: ChatMessage = { role: m.role, content }
+      if (urls.length) item.images = urls
+      if (docs?.length) item.docs = docs
+      history.push(item)
     }
 
     if (!history.length) return
@@ -204,12 +193,16 @@ export function useChat(getMessages: () => Message[]) {
             // 裁掉了历史就必须说：模型"忘事"的真实原因在这里，
             // 不写进消息的话，用户只能归因成"它变笨了"。
             if (stats.dropped > 0) m.historyDropped = stats.dropped
+            if (stats.dropped > 0 && stats.droppedChars > 0) {
+              m.historyDroppedChars = stats.droppedChars
+            }
           },
-          onError: (msg) => {
+          onError: (err) => {
             const m = messages[idx]
             if (!m) return
-            m.content = msg
+            m.content = err.message
             m.error = true
+            if (err.hint) m.errorHint = err.hint
           },
         },
         abortController.signal,
@@ -218,7 +211,9 @@ export function useChat(getMessages: () => Message[]) {
       if ((e as Error)?.name !== 'AbortError') {
         const m = messages[idx]
         if (m) {
+          // 走到这里说明流已建立、读到一半断了（fetch 阶段的失败由 onError 处理）
           m.content = '网络连接失败'
+          m.errorHint = '确认网关（9000）在运行，然后点「重试」'
           m.error = true
         }
       }

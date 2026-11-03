@@ -7,19 +7,16 @@
 健康检查路径是 `/health`，**不带 /api 前缀**：ASR 是独立服务，
 它的内部命名不受前端契约约束（网关负责映射成对外的 /api/asr）。
 """
-import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app import model_holder
+from app import model_holder, trace
 from app.routers import transcribe
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-)
+# 日志格式带 trace 字段：relay 传来的 X-Trace-Id 会出现在每一行里。
+trace.configure()
 
 
 @asynccontextmanager
@@ -41,6 +38,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 最后加 = 最外层（Starlette 里后加的包在外面）：连 CORS 预检的响应也带 trace_id。
+app.add_middleware(trace.TraceMiddleware)
 
 app.include_router(transcribe.router)
 

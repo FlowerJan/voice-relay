@@ -7,30 +7,23 @@ import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
+from app.body import BodyTooLarge, read_body
 from app.config import settings
+from app.errors import error_response as _err
+from app.errors import merge_upstream_error
 from app.middleware import TRACE_HEADER, get_trace_id
 from app.upstream import get_client
 
 router = APIRouter()
 
 
-def _err(status: int, code: str, message: str):
-    return JSONResponse(
-        status_code=status,
-        content={
-            "error": {
-                "code": code,
-                "message": message,
-                "status": status,
-                "trace_id": get_trace_id(),
-            }
-        },
-    )
-
-
 @router.post("/api/tts")
 async def tts(request: Request):
-    body = await request.body()
+    try:
+        body = await read_body(request, settings.tts_max_body)
+    except BodyTooLarge as e:
+        return _err(413, "tts_body_too_large", e.message)
+
     client = get_client()
     trace_id = get_trace_id()
 
@@ -49,9 +42,23 @@ async def tts(request: Request):
         return _err(502, "tts_error", f"TTS 服务通信失败：{str(e)[:150]}")
 
     if upstream.status_code >= 400:
-        detail = upstream.text[:300]
+        # 下游 TTS 的失败也是统一错误体。以前这里直接取 `upstream.text[:300]`，
+        # 用户就在气泡里看到一坨 `{"error": {"code": "tts_failed", ...}}` 原文，
+        # 而且第 3 项给四条链路都配了 hint，只有这条路被整体绕过。
+        raw = upstream.text[:300]
+        try:
+            payload = upstream.json()
+        except Exception:  # noqa: BLE001  不是 JSON（HTML 错误页之类）
+            payload = None
         await upstream.aclose()
-        return _err(upstream.status_code, "tts_upstream_error", detail or "TTS 合成失败")
+
+        if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
+            # 下游的 code 是它自己造的（tts_failed…），精确表和前缀都认不出来，
+            # 所以显式退到 TTS 这条链路的建议；下游哪天自带 hint 就不覆盖。
+            payload = merge_upstream_error(payload, upstream.status_code, "tts", trace_id)
+            return JSONResponse(status_code=upstream.status_code, content=payload)
+
+        return _err(upstream.status_code, "tts_upstream_error", raw or "TTS 合成失败")
 
     audio = upstream.content
     media = upstream.headers.get("content-type", "audio/mpeg")

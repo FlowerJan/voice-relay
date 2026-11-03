@@ -13,11 +13,14 @@
 
 另外两个刻意的设计：
 
-  * 端口已在监听 → 先请求 /health 认身份，认得出来才跳过（这样你可以用它起全部，
+  * 端口已在监听 → 先探活认身份，认得出来才跳过（这样你可以用它起全部，
     再单独去某个目录重起某个服务调试，两者不打架）；认不出来说明端口被**别的
     程序**占着，直接报出占用者和处置办法后退出。
     只看"端口有人听"是不够的——本项目就吃过这个亏：一个无关的 python 进程先绑了
     8000，这里静默跳过、以为"已经在跑"，结果前端一路 404，排查了半天。
+    探活路径见 `Service.identity_path`：三个引擎和后端都用各自的 health，
+    relay 用的是浅探针 `/api/identity`（它**不聚合下游**——身份问题不该取决于
+    下游忙不忙，详见 `relay/app/routers/health.py` 的头注释）。
   * Ctrl+C 一次收全部。Windows 下 uvicorn 的 reload 模式会派生子进程，
     必须 taskkill /T 才能连带子进程一起杀掉，否则端口被僵尸进程占住、
     表现为"改了代码不生效"——这个坑本项目已经踩过一次。
@@ -77,13 +80,18 @@ class Service:
     port: int
     wait: float          # 最多等它多少秒就绪
     desc: str
-    health: str          # 探活路径，用来确认"占着端口的到底是谁"
+    identity_path: str   # 探活路径：用来确认"占着端口的到底是谁"
     identity: str        # 该路径返回体里必须出现的身份标识
     proc: subprocess.Popen | None = None
 
 
-# 顺序即依赖顺序：三个模型层 → 协议层 → 前端。
-# 网关不主动探活，先起 9000 的话它不报错，但一收请求就是 502。
+# 顺序即**补探**顺序：三个模型层 → 协议层 → 前端。
+#
+# 注意这不是"依赖所以必须串行"——main() 是先全部 spawn、再逐个 wait_ready。
+# 顺序真正的作用在后半段：relay 的 identity_path 是浅探针 /api/identity，
+# 它**故意不聚合下游**，所以"relay 就绪"只说明 9000 起来了，不说明 8000-8002
+# 好了。前端开浏览器发生在最后一个 wait_ready 之后，靠的正是"先等完下游"这个
+# 顺序。把 relay 挪到列表前面，浏览器就会在下游还在加载时打开。
 #
 # identity 一律取"对方自己吐出来的、别人极不可能恰好也吐的那一串"：
 # 四个后端服务认 service 字段，前端认 Vite 注入的 /@vite/client。
@@ -95,7 +103,7 @@ SERVICES: list[Service] = [
     Service("tts",   "engine/tts",      ["run.py"],        8002, 30, "说 · edge-tts（远程合成）",
             "/health", '"service":"tts"'),
     Service("relay", "relay",           ["run.py"],        9000, 30, "协议层 · 唯一对外入口",
-            "/api/health", '"service":"relay"'),
+            "/api/identity", '"service":"relay"'),
     Service("view",  "view",            ["run", "dev"],    5173, 60, "前端 · Vite",
             "/", "@vite/client"),
 ]
@@ -127,8 +135,13 @@ def _squeeze(s: str) -> str:
 def fetch_head(port: int, path: str, timeout: float = 5.0) -> str | None:
     """取响应体开头一段用于认身份。连不上、超时、非 2xx 一律返回 None。
 
-    超时给到 5s 是量出来的：relay 的 /api/health 要串并三个下游，某个下游刚挂
-    时会等它自己的超时，实测 2.2s。给 1.5s 就会把"自己人反应慢"误判成"外人占位"。
+    超时默认 5s，是给"问这个端口是不是本服务"用的：宁可多等，也不能把
+    "自己人反应慢"误判成"外人占位"。
+
+    **但这个数只对浅探针成立。** 早期 relay 的身份探针指向聚合的 /api/health，
+    而它内部的每个下游超时也是 5s——客户端预算等于服务端最坏预算，结论是
+    "必然超时"而不是"偶尔超时"。现在 relay 的身份探针改成了 /api/identity
+    （不聚合下游），两侧预算不再相等。
     """
     try:
         with urllib.request.urlopen(f"http://localhost:{port}{path}", timeout=timeout) as r:
@@ -137,17 +150,23 @@ def fetch_head(port: int, path: str, timeout: float = 5.0) -> str | None:
         return None
 
 
-def is_self(svc: Service) -> bool:
+def is_self(svc: Service, attempts: int = 2, timeout: float = 5.0) -> bool:
     """端口上跑的到底是不是这个服务。返回体里认得出 identity 才算。
 
     探不到就再给一次机会：首轮可能正好赶上对方在做慢启动或慢响应，
     这里的目标是抓"根本不是它"，不是抓"它此刻有点慢"。
+
+    `attempts` / `timeout` 可调，是因为这个函数被两类问题共用，而两类问题的
+    代价不同：**"这个端口是不是我的"**（launch / --check，误判就拒绝启动，
+    所以宁慢勿错，用默认的 2 次 × 5s）；**"它好了没有"**（wait_ready，每 0.3s
+    问一遍，误判只是多等一轮，所以用 1 次 × 2s，别把等待预算耗在一次探测上）。
+    判据本身（同一个 identity_path、同一个 identity 串）是同一套，不许分叉。
     """
-    for attempt in range(2):
-        body = fetch_head(svc.port, svc.health)
+    for attempt in range(attempts):
+        body = fetch_head(svc.port, svc.identity_path, timeout)
         if body is not None and _squeeze(svc.identity) in _squeeze(body):
             return True
-        if attempt == 0:
+        if attempt + 1 < attempts:
             time.sleep(0.4)
     return False
 
@@ -199,7 +218,7 @@ def launch(svc: Service) -> None:
         # 端口有人听 ≠ 是我们的服务。放它过去只会得到"前端白屏 404"这种远因报错，
         # 所以这里就当场停下，把"谁占的、怎么办"直接说清楚。
         raise SystemExit(
-            f"\n:{svc.port} 上认不出本服务（探活 {svc.health} 里没有 {svc.identity}）。\n"
+            f"\n:{svc.port} 上认不出本服务（探活 {svc.identity_path} 里没有 {svc.identity}）。\n"
             f"  占用者：{occupant(svc.port)}\n"
             f"  可能是别的程序占了这个端口；也可能它就是本服务的旧进程——\n"
             f"  旧进程要杀掉重启才会加载新代码。关掉它再跑 dev.py 即可。\n"
@@ -247,13 +266,22 @@ def _pump(svc: Service) -> None:
 
 
 def wait_ready(svc: Service) -> None:
+    """等到"端口通了 **且** 认得出身份"才算就绪。
+
+    只看端口是不够的：uvicorn 是 lifespan 跑完才 bind socket，所以"端口在监听"
+    确实已经过了加载模型那一关；但"有人在这个端口上监听"和"这个端口上是我们
+    这个服务、路由已经挂全了"是两件事。差别不大，代价却不对称——早一步宣布
+    就绪，前端就会在还没接上下游的时候打开浏览器，用户看到的是白屏或一片 502。
+
+    所以这里用 1 次 × 2s 的身份探测（见 is_self 的说明），每 0.3s 试一轮。
+    """
     t0 = time.time()
     while time.time() - t0 < svc.wait:
         if svc.proc and svc.proc.poll() is not None:
             raise SystemExit(
                 f"{svc.name} 启动即退出（退出码 {svc.proc.returncode}），往上看它的日志"
             )
-        if port_open(svc.port):
+        if port_open(svc.port) and is_self(svc, attempts=1, timeout=2.0):
             say(f"就绪 :{svc.port}  {time.time() - t0:.1f}s", svc.name)
             return
         time.sleep(0.3)
@@ -322,6 +350,12 @@ def main() -> int:
 
     say(f"项目根 {ROOT}")
     try:
+        # 先全部 spawn，再逐个 wait_ready —— spawn 不排队（ASR 要读 1.8GB 模型，
+        # 让它先开始读），等待才排队。
+        #
+        # "等"的顺序是有意义的：SERVICES 里下游排在 relay 前面，而 relay 的身份
+        # 探针是**浅**的（不聚合），所以"relay 就绪"不代表下游就绪。浏览器在最后
+        # 一个 wait_ready 之后才开，靠的就是这个顺序。
         for svc in SERVICES:
             launch(svc)
         for svc in SERVICES:

@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { renderMarkdown } from '../utils/markdown'
 import { getImage } from '../utils/imageStore'
 import { docMeta } from '../utils/doc'
+import { humanChars } from '../utils/format'
 import type { Message, MsgImage } from '../composables/useChat'
 
 const props = defineProps<{
@@ -251,7 +252,12 @@ async function openZoom(img: MsgImage) {
             </details>
           </template>
 
-          <div v-if="m.error" class="content error-text">{{ m.content }}</div>
+          <!-- 错误分两行：第一行"哪里坏了"，第二行"现在能做什么"。
+               合成一段会让人扫不出来——出问题时读者只想找那句动作。 -->
+          <template v-if="m.error">
+            <div class="content error-text">{{ m.content }}</div>
+            <div v-if="m.errorHint" class="err-hint">{{ m.errorHint }}</div>
+          </template>
           <div v-else-if="m.content" class="content" v-html="renderMarkdown(m.content)"></div>
           <div v-else-if="thinking && i === lastIdx" class="thinking">
             <span class="dot"></span><span class="dot"></span><span class="dot"></span>
@@ -266,7 +272,9 @@ async function openZoom(img: MsgImage) {
                历史裁剪是"它当时就没看到那些对话"（中性说明）。混成一个黄色警告条，
                会让人以为出了故障，实际上这是设计好的预算取舍。 -->
           <div v-if="m.historyDropped" class="hint">
-            本次回答没有看到更早的 {{ m.historyDropped }} 条对话（超出上下文预算）
+            本次回答没有看到更早的 {{ m.historyDropped }} 条对话（<template
+              v-if="m.historyDroppedChars">约 {{ humanChars(m.historyDroppedChars) }} 字，</template
+            >超出上下文预算）
           </div>
 
           <div v-if="m.content || m.error || m.images?.length || m.docs?.length" class="msg-ops">
@@ -413,6 +421,17 @@ async function openZoom(img: MsgImage) {
 
 .error-text {
   color: #dc2626;
+}
+
+/* 建议用左竖线而不是整块底色：错误文案才是主角，这段是"接下来做什么"的旁注。
+   和上面那行红字同色系、更小一号，读起来是同一件事的两句话，不是两条通知。 */
+.err-hint {
+  margin-top: 6px;
+  padding-left: 8px;
+  border-left: 2px solid #fca5a5;
+  color: #b91c1c;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* ---- 消息里的图片 ---- */

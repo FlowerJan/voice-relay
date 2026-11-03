@@ -2,7 +2,7 @@
 // 整段合成，不做边生成边播（见设计文档 5.4）。
 
 interface TTSErrorEnvelope {
-  error?: { code?: string; message?: string }
+  error?: { code?: string; message?: string; hint?: string }
 }
 
 export class TTSError extends Error {
@@ -30,7 +30,8 @@ export async function synthesize(text: string, signal?: AbortSignal): Promise<Bl
     let message = `语音合成失败（HTTP ${resp.status}）`
     try {
       const data = (await resp.json()) as TTSErrorEnvelope
-      if (data?.error?.message) message = data.error.message
+      const err = data?.error
+      if (err?.message) message = err.hint ? `${err.message}。${err.hint}` : err.message
     } catch {
       // 忽略：不是 JSON 就用上面的默认文案
     }

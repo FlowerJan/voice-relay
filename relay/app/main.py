@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.concurrency import ConcurrencyLimitMiddleware
 from app.middleware import ErrorEnvelopeMiddleware, TraceIdMiddleware
 from app.routers import asr, chat, extract, health, tts
 from app.upstream import close_client
@@ -34,6 +35,12 @@ app = FastAPI(
 app.add_middleware(
     ErrorEnvelopeMiddleware,
 )
+# 顺序有讲究：add_middleware 是"后加的在外层"，所以请求的实际路径是
+# CORS → TraceId → 并发上限 → ErrorEnvelope → 路由。
+# 并发上限放在 TraceId 里面，是为了让那条 503 也带上 trace_id（它自己就是
+# 一次可追的请求）；放在 ErrorEnvelope 外面，是因为它自己就是正常返回，
+# 不需要异常收口。
+app.add_middleware(ConcurrencyLimitMiddleware, limit=32)
 app.add_middleware(
     TraceIdMiddleware,
 )

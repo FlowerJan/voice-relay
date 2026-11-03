@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     chat_retry_times: int = 1
     chat_retry_backoff: float = 0.5
 
+    # 请求体上限（字节）。四条链路都要有，数值不同——上限的意义是"挡住正常用法
+    # 永远碰不到的量级"，不是"卡住正常用法"，所以每个值都按该链路的真实体积反推：
+    # chat 装的是 base64 图片 + 文档正文，TTS 只有要朗读的文字，
+    # ASR 是音频，抽取是 20MB 文件加 multipart 头。
+    chat_max_body: int = 16 * 1024 * 1024
+    tts_max_body: int = 512 * 1024
+    asr_max_body: int = 25 * 1024 * 1024
+    extract_max_body: int = 24 * 1024 * 1024
+
     # 链路 ID 前缀，方便在三个服务的日志里一眼认出是哪一跳
     service_name: str = "relay"
 

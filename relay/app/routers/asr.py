@@ -8,30 +8,29 @@
 
 外部路径 `/api/asr` → 内部路径 `/asr/transcribe`：网关负责这一次名字映射，
 这样模型层的内部命名可以自由调整，前端契约不受影响。
+
+**同时只放一个请求进 8001。** ASR 是本地 CPU 单进程推理，两个人同时说话不会
+并行，只会排队——而排队期间请求体、连接、上游 socket 全都占着，队列还能无限
+增长。所以第二个请求直接 503，而不是让它在那儿等：**看得见的忙，好过看不见
+的等**。这和"分路超时/body 上限"不是一回事，那两条管的是单个请求。
 """
+import asyncio
+
 import httpx
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
+from app.body import declared_too_large, limit_text
 from app.config import settings
+from app.errors import error_response as _err
+from app.errors import merge_upstream_error
 from app.middleware import TRACE_HEADER, get_trace_id
 from app.upstream import get_client
 
 router = APIRouter()
 
-
-def _err(status: int, code: str, message: str):
-    return JSONResponse(
-        status_code=status,
-        content={
-            "error": {
-                "code": code,
-                "message": message,
-                "status": status,
-                "trace_id": get_trace_id(),
-            }
-        },
-    )
+#: ASR 的并发槽。1 就是"一次一段"——判断在下面，不在这里等。
+_slot = asyncio.Semaphore(1)
 
 
 @router.post("/api/asr")
@@ -39,6 +38,23 @@ async def asr(request: Request):
     content_type = request.headers.get("content-type", "")
     if not content_type.startswith("multipart/form-data"):
         return _err(400, "bad_request", "需要 multipart/form-data 上传音频")
+
+    # 这条链路是边收边转，不攒内存，所以只做"声明长度"预检：
+    # 明显超限的直接拒，不浪费 8001 一次推理。
+    if declared_too_large(request, settings.asr_max_body):
+        return _err(
+            413,
+            "asr_body_too_large",
+            f"请求体超过 {limit_text(settings.asr_max_body)} 上限",
+        )
+
+    # 这一条必须排在 8001 之前：已经有一段的推理在跑，再把这段送进去只是让
+    # 两段都变慢、并多占一份内存。
+    #
+    # 用 locked() 判断、不用 `wait_for(acquire(), timeout=0)`：判断和下面的
+    # `async with` 之间没有 await，事件循环单线程，两者之间不可能插进别的请求。
+    if _slot.locked():
+        return _err(503, "asr_busy", "ASR 正在识别另一段录音（同时只处理一段）")
 
     client = get_client()
     trace_id = get_trace_id()
@@ -63,16 +79,18 @@ async def asr(request: Request):
     )
 
     try:
-        upstream = await client.send(upstream_req)
+        # 槽覆盖"发出去 + 读完响应"整段：推理在 8001 那边，只锁住 send 的话
+        # 下一段照样能挤进去排队。
+        async with _slot:
+            upstream = await client.send(upstream_req)
+            body = await upstream.aread()
+            await upstream.aclose()
     except httpx.ConnectError:
         return _err(502, "asr_unreachable", "ASR 服务（8001）未启动或无法连接")
     except httpx.ReadTimeout:
         return _err(504, "asr_timeout", f"ASR 识别超时（>{settings.asr_timeout:.0f} 秒）")
     except httpx.HTTPError as e:
         return _err(502, "asr_error", f"ASR 服务通信失败：{str(e)[:150]}")
-
-    body = await upstream.aread()
-    await upstream.aclose()
 
     if upstream.status_code >= 400:
         # 下游已经是统一格式就直接透传，否则包一层。
@@ -84,7 +102,9 @@ async def asr(request: Request):
                                  "message": body.decode("utf-8", "ignore")[:300],
                                  "status": upstream.status_code}}
         if isinstance(payload, dict) and isinstance(payload.get("error"), dict):
-            payload["error"].setdefault("trace_id", trace_id)
+            # 下游的 code 对我们来说是未知码（bad_audio、no_speech…），精确表和前缀
+            # 都可能认不出来，这时退到 ASR 这条链路的建议；下游自带 hint 就不覆盖。
+            payload = merge_upstream_error(payload, upstream.status_code, "asr", trace_id)
         return JSONResponse(status_code=upstream.status_code, content=payload)
 
     try:

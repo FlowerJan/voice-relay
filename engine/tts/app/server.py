@@ -14,17 +14,18 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from app import trace
 from app.clean_text import to_speech_text
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(name)s | %(message)s",
-)
+# 日志格式带 trace 字段：relay 传来的 X-Trace-Id 会出现在每一行里。
+trace.configure()
 logger = logging.getLogger("tts.api")
 
 DEFAULT_VOICE = "zh-CN-XiaoxiaoNeural"
 
 app = FastAPI(title="语音文字智能体 · TTS 服务（模型层）", version="2.0")
+# 最外层：所有响应（含 4xx/5xx）都带上 trace_id，方便直连调试时对日志。
+app.add_middleware(trace.TraceMiddleware)
 
 
 class TTSRequest(BaseModel):

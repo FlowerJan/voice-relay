@@ -9,9 +9,9 @@ export interface ASRResult {
   infer_seconds: number
 }
 
-/** 网关统一错误格式：{"error": {"code","message","status","trace_id"}} */
+/** 网关统一错误格式：{"error": {"code","message","hint","status","trace_id"}} */
 interface ErrorEnvelope {
-  error?: { code?: string; message?: string; status?: number }
+  error?: { code?: string; message?: string; hint?: string; status?: number }
 }
 
 export class ASRError extends Error {
@@ -49,7 +49,10 @@ export async function transcribe(
 
   if (!resp.ok) {
     const err = (data as ErrorEnvelope)?.error
-    throw new ASRError(err?.message || `识别失败（HTTP ${resp.status}）`, err?.code || 'http_error')
+    const msg = err?.message || `识别失败（HTTP ${resp.status}）`
+    // 语音错误只占输入框上方的一行横条，没有第二行的位置，所以这里把建议
+    // 并进同一句："识别超时（>120 秒）。分段录，或等几秒再录一次。"
+    throw new ASRError(err?.hint ? `${msg}。${err.hint}` : msg, err?.code || 'http_error')
   }
 
   return data as ASRResult

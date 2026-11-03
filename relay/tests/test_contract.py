@@ -90,7 +90,13 @@ def test_engine_has_no_stray_type_literals():
 
     用 AST 而不是正则：正则会把文档字符串里举例的 `{"type": "text"}`
     也算成违规，那个例子讲的是多模态 part，跟 SSE 事件不是一回事。
+
+    **白名单只放多模态 part 的类型。** `{"type": "text"}` 和
+    `{"type": "delta"}` 长得一样，含义完全不同：前者是发给 DeepSeek 的
+    content 结构，后者才是本服务对前端的输出。不区分的话，任何给消息补
+    part 的代码都会红，最后只能把测试删掉——那才是真的丢了防线。
     """
+    part_types = {"text", "image_url"}
     offenders = []
     for path in (ROOT / "engine" / "deepseek" / "app").rglob("*.py"):
         if path.name == "events.py":
@@ -102,7 +108,7 @@ def test_engine_has_no_stray_type_literals():
             for key, value in zip(node.keys, node.values):
                 is_type_key = isinstance(key, ast.Constant) and key.value == "type"
                 is_str_value = isinstance(value, ast.Constant) and isinstance(value.value, str)
-                if is_type_key and is_str_value:
+                if is_type_key and is_str_value and value.value not in part_types:
                     offenders.append(f"{path.relative_to(ROOT)}:{node.lineno}")
     assert not offenders, "发现硬编码的事件类型字面量：" + ", ".join(offenders)
 
@@ -242,3 +248,70 @@ def test_frontend_tells_the_user_when_history_is_dropped():
     """
     src = (ROOT / "view" / "src" / "components" / "MessageList.vue").read_text(encoding="utf-8")
     assert "historyDropped" in src, "MessageList 没有渲染 historyDropped，用户无从得知上下文被裁过"
+
+
+# ---------------- 第三层：请求方向的字段 ----------------
+#
+# 响应方向有 chat-events.json 兜着，请求方向一直靠"两边写的名字恰好一样"。
+# 这个假设一旦破了，故障形状极其安静：pydantic 默认忽略未知字段，请求照样 200，
+# 只是模型那边少了一整份文档，用户以为文件没传上去。
+
+
+def _ts_fields(src: str, name: str) -> set[str]:
+    """从 TS 的 `interface X { ... }` 里抓字段名（去掉注释和可选标记）。"""
+    match = re.search(rf"export interface {name} \{{(.*?)\n\}}", src, re.S)
+    assert match, f"前端里找不到 interface {name}"
+    body = re.sub(r"/\*.*?\*/", "", match.group(1), flags=re.S)
+    body = re.sub(r"//.*", "", body)
+    return set(re.findall(r"^\s*(\w+)\??\s*:", body, re.M))
+
+
+def _py_class_fields(tree: ast.Module, name: str) -> set[str]:
+    """从 pydantic 模型里抓字段名。"""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return {
+                stmt.target.id
+                for stmt in node.body
+                if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+            }
+    raise AssertionError(f"引擎里找不到模型 {name}")
+
+
+def test_request_payload_fields_match_engine_schema():
+    """前端实际发出去的键，必须和后端模型字段一字不差。
+
+    比的是 `ApiMessage`（真正序列化上线的那层），不是界面里的 `ChatMessage`：
+    后者带 `images` 这种只在浏览器内部存在的字段，拿它比会得到假报警。
+    """
+    ts = FRONTEND_DISPATCH.read_text(encoding="utf-8")
+    engine = ast.parse((ROOT / "engine" / "deepseek" / "app" / "schemas.py").read_text(encoding="utf-8"))
+
+    front, back = _ts_fields(ts, "ApiMessage"), _py_class_fields(engine, "ChatMessage")
+    assert front == back, (
+        f"请求字段不一致：前端 {sorted(front)}，引擎 {sorted(back)}。"
+        "pydantic 会静默丢弃未知字段，请求不会报错，只会少数据。"
+    )
+
+    front_doc, back_doc = _ts_fields(ts, "ChatDocPayload"), _py_class_fields(engine, "DocAttachment")
+    assert front_doc == back_doc, f"附件字段不一致：前端 {sorted(front_doc)}，引擎 {sorted(back_doc)}"
+
+
+def test_attachments_are_sent_as_structure_not_as_prespliced_text():
+    """文档必须以结构化字段发送，不能再由前端拼成字符串。
+
+    拼字符串就意味着围栏和转义只能在前端做，而"只对这一个客户端生效的安全属性"
+    等于没有：任何直连 8000 的脚本都能伪造 `</document>`。这条测试防的是
+    有人图省事把拼标签的逻辑搬回前端。
+    """
+    ts = FRONTEND_DISPATCH.read_text(encoding="utf-8")
+    # 注释里提到 `<document>` 是在解释"为什么不在前端拼"，不算违规；
+    # 要查的是代码本身有没有在拼。
+    code = re.sub(r"/\*.*?\*/", "", ts, flags=re.S)
+    code = re.sub(r"//.*", "", code)
+
+    assert "docs" in code, "前端不再发送 docs 字段"
+    assert "<document" not in code, "前端又在拼 document 围栏了——围栏属于协议，不属于界面"
+
+    fence = ROOT / "engine" / "deepseek" / "app" / "services" / "doc_fence.py"
+    assert fence.is_file(), "服务端的围栏实现不见了"

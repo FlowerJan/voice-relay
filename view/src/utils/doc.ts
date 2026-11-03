@@ -69,7 +69,7 @@ interface ExtractResponse {
   scanned?: boolean
   note?: string
   message?: string
-  error?: { message?: string }
+  error?: { message?: string; hint?: string }
 }
 
 /** 上传并抽取。抛出的错误文案直接可展示。 */
@@ -97,8 +97,11 @@ export async function extractDoc(file: File, signal?: AbortSignal): Promise<MsgD
   }
 
   if (!resp.ok || data.ok === false) {
-    // 后端把"扫描件""老格式 .doc"这类可自助解决的问题都写在 message 里，直接透给用户
-    throw new Error(data.message || data.error?.message || `解析失败（HTTP ${resp.status}）`)
+    // 后端把"扫描件""老格式 .doc"这类可自助解决的问题都写在 message 里，直接透给用户；
+    // hint 是"那我现在做什么"（做 OCR / 另存为 docx），并进去才是一句完整的话。
+    const msg =
+      data.message || data.error?.message || `解析失败（HTTP ${resp.status}）`
+    throw new Error(data.error?.hint ? `${msg}。${data.error.hint}` : msg)
   }
 
   const text = data.text ?? ''

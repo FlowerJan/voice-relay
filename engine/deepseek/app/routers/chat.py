@@ -1,6 +1,7 @@
 """聊天接口：POST /api/chat/stream（SSE 流式）+ GET /api/health + GET /api/balance。"""
 import asyncio
 import json
+import logging
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -11,6 +12,7 @@ from app.services.balance_service import BalanceError, fetch_balance
 from app.services.chat_service import stream_chat
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def _sse(event: dict) -> str:
@@ -19,6 +21,10 @@ def _sse(event: dict) -> str:
 
 @router.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest):
+    # 每个请求留一行：没有它，成功路径在日志里就是一段空白，
+    # 想确认"请求到底进没进这一层"只能靠猜。trace_id 由日志格式自动带上。
+    logger.info("收到请求：历史 %d 条", len(req.messages))
+
     async def event_generator():
         async for event in stream_chat(req.messages):
             yield _sse(event)

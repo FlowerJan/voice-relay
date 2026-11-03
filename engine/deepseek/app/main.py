@@ -12,9 +12,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app import trace
 from app.config import settings
 from app.routers import chat, extract
 from app.services.chat_service import close_client
+
+# 日志格式带 trace 字段：relay 传来的 X-Trace-Id 会出现在每一行里。
+trace.configure()
 
 
 @asynccontextmanager
@@ -38,6 +42,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 最后加 = 最外层（Starlette 里后加的包在外面）：连 CORS 的预检响应也带上 trace_id。
+app.add_middleware(trace.TraceMiddleware)
 
 app.include_router(chat.router)
 app.include_router(extract.router)

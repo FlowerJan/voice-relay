@@ -11,6 +11,7 @@ import asyncio
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import JSONResponse
 
+from app.config import settings
 from app.services import extract_service
 from app.services.extract_service import ExtractError
 
@@ -36,8 +37,22 @@ async def extract(file: UploadFile = File(...)):
     try:
         # 解析是纯 CPU 活（PDF 排版还原尤其慢），丢线程池，别把事件循环堵住——
         # 堵住的后果不是这一个文件慢，而是同一时刻的聊天流式也会卡住。
-        result = await asyncio.to_thread(
-            extract_service.extract, file.filename or "", data
+        #
+        # 外面再套一层超时：`asyncio.to_thread` 只保证不堵事件循环，不保证会结束。
+        # 畸形文档可以解析很久，而这段时间用户只看到转圈。
+        #
+        # **注意超时不会杀掉那个线程**（Python 没法从外部终止线程）。它会在后台
+        # 跑完，结果被丢弃。这是有意的取舍：与其让用户无限等，不如先给一句明确
+        # 的话，让那个线程自己跑完退出。代价是短时间内多占一个线程，可接受。
+        result = await asyncio.wait_for(
+            asyncio.to_thread(extract_service.extract, file.filename or "", data),
+            timeout=settings.extract_timeout,
+        )
+    except asyncio.TimeoutError:
+        return _fail(
+            504,
+            f"解析超过 {settings.extract_timeout:.0f} 秒仍未完成："
+            "这个文件排版太复杂或页数太多，请拆成几个小文件再传",
         )
     except ExtractError as e:
         return _fail(400, str(e))
